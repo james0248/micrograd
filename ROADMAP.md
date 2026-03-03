@@ -2,9 +2,10 @@
 
 ## Stage Tracking
 
-- Current Stage: `Stage 3 - Forward Ops`
+- Current Stage: `Stage 4 - Backward Engine`
 - Last Updated: `2026-03-03`
-- Next Gate: `Stage 3 acceptance`
+- Next Gate: `Stage 4 acceptance`
+- Stage 3 Status: `Accepted (forward ops + tests complete on 2026-03-03)`
 
 ## Thematic Priorities
 

@@ -94,11 +94,77 @@ impl Value {
     pub fn is_leaf(&self) -> bool {
         self.0.borrow().parents.is_empty()
     }
+
+    pub fn add(&self, other: &Value) -> Value {
+        Value::from_op(
+            self.data() + other.data(),
+            Op::Add,
+            vec![self.clone(), other.clone()],
+        )
+    }
+
+    pub fn mul(&self, other: &Value) -> Value {
+        Value::from_op(
+            self.data() * other.data(),
+            Op::Mul,
+            vec![self.clone(), other.clone()],
+        )
+    }
+
+    pub fn sub(&self, other: &Value) -> Value {
+        Value::from_op(
+            self.data() - other.data(),
+            Op::Sub,
+            vec![self.clone(), other.clone()],
+        )
+    }
+
+    pub fn div(&self, other: &Value) -> Value {
+        Value::from_op(
+            self.data() / other.data(),
+            Op::Div,
+            vec![self.clone(), other.clone()],
+        )
+    }
+
+    pub fn neg(&self) -> Value {
+        Value::from_op(-self.data(), Op::Neg, vec![self.clone()])
+    }
+
+    pub fn pow(&self, other: &Value) -> Value {
+        Value::from_op(
+            self.data().powf(other.data()),
+            Op::Pow,
+            vec![self.clone(), other.clone()],
+        )
+    }
+
+    pub fn tanh(&self) -> Value {
+        Value::from_op(self.data().tanh(), Op::Tanh, vec![self.clone()])
+    }
+
+    pub fn exp(&self) -> Value {
+        Value::from_op(self.data().exp(), Op::Exp, vec![self.clone()])
+    }
+
+    pub fn relu(&self) -> Value {
+        let x = self.data();
+        let out = if x > 0.0 { x } else { 0.0 };
+        Value::from_op(out, Op::Relu, vec![self.clone()])
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{Op, Value};
+
+    fn assert_close(actual: f64, expected: f64, epsilon: f64) {
+        let diff = (actual - expected).abs();
+        assert!(
+            diff <= epsilon,
+            "expected {expected}, got {actual}, diff={diff}, epsilon={epsilon}"
+        );
+    }
 
     #[test]
     fn new_initializes_leaf_state() {
@@ -160,5 +226,93 @@ mod tests {
         let a = Value::new(0.0);
         let b = Value::new(0.0);
         assert_ne!(a.id(), b.id());
+    }
+
+    #[test]
+    fn add_mul_sub_div_neg_forward_values_and_metadata() {
+        let a = Value::new(4.0);
+        let b = Value::new(2.0);
+
+        let add = a.add(&b);
+        assert_eq!(add.data(), 6.0);
+        assert_eq!(add.op(), Some(Op::Add));
+        assert_eq!(add.parents().len(), 2);
+        assert_eq!(add.parents()[0].id(), a.id());
+        assert_eq!(add.parents()[1].id(), b.id());
+
+        let mul = a.mul(&b);
+        assert_eq!(mul.data(), 8.0);
+        assert_eq!(mul.op(), Some(Op::Mul));
+
+        let sub = a.sub(&b);
+        assert_eq!(sub.data(), 2.0);
+        assert_eq!(sub.op(), Some(Op::Sub));
+
+        let div = a.div(&b);
+        assert_eq!(div.data(), 2.0);
+        assert_eq!(div.op(), Some(Op::Div));
+
+        let neg = a.neg();
+        assert_eq!(neg.data(), -4.0);
+        assert_eq!(neg.op(), Some(Op::Neg));
+        assert_eq!(neg.parents().len(), 1);
+        assert_eq!(neg.parents()[0].id(), a.id());
+    }
+
+    #[test]
+    fn pow_is_value_based() {
+        let a = Value::new(3.0);
+        let exponent = Value::new(2.0);
+        let out = a.pow(&exponent);
+
+        assert_eq!(out.data(), 9.0);
+        assert_eq!(out.op(), Some(Op::Pow));
+        assert_eq!(out.parents().len(), 2);
+        assert_eq!(out.parents()[0].id(), a.id());
+        assert_eq!(out.parents()[1].id(), exponent.id());
+    }
+
+    #[test]
+    fn tanh_and_exp_forward_values() {
+        let a = Value::new(0.0);
+        let tanh = a.tanh();
+        assert_close(tanh.data(), 0.0, 1e-12);
+        assert_eq!(tanh.op(), Some(Op::Tanh));
+
+        let b = Value::new(1.0);
+        let exp = b.exp();
+        assert_close(exp.data(), std::f64::consts::E, 1e-12);
+        assert_eq!(exp.op(), Some(Op::Exp));
+    }
+
+    #[test]
+    fn relu_handles_negative_zero_and_positive() {
+        let neg = Value::new(-3.0).relu();
+        assert_eq!(neg.data(), 0.0);
+        assert_eq!(neg.op(), Some(Op::Relu));
+
+        let zero = Value::new(0.0).relu();
+        assert_eq!(zero.data(), 0.0);
+        assert_eq!(zero.op(), Some(Op::Relu));
+
+        let pos = Value::new(2.5).relu();
+        assert_eq!(pos.data(), 2.5);
+        assert_eq!(pos.op(), Some(Op::Relu));
+    }
+
+    #[test]
+    fn composed_expression_matches_expected_forward_value() {
+        let x = Value::new(2.0);
+        let y = Value::new(-3.0);
+        let z = Value::new(10.0);
+
+        let q = x.mul(&y);
+        let n = q.add(&z);
+        let out = n.tanh();
+
+        assert_close(out.data(), 4.0f64.tanh(), 1e-12);
+        assert_eq!(out.op(), Some(Op::Tanh));
+        assert_eq!(out.parents().len(), 1);
+        assert_eq!(out.parents()[0].id(), n.id());
     }
 }
