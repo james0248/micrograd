@@ -2,12 +2,13 @@
 
 ## Stage Tracking
 
-- Current Stage: `Stage 6 - Tiny NN + Training Demo`
+- Current Stage: `Stage 7 - Final Verification`
 - Last Updated: `2026-03-03`
-- Next Gate: `Stage 6 acceptance`
+- Next Gate: `Stage 7 acceptance`
 - Stage 3 Status: `Accepted (forward ops + tests complete on 2026-03-03)`
 - Stage 4 Status: `Accepted (backward engine + tests complete on 2026-03-03)`
 - Stage 5 Status: `Accepted (operator ergonomics + parity tests complete on 2026-03-03)`
+- Stage 6 Status: `Accepted (tiny NN + deterministic training demo complete on 2026-03-03)`
 
 ## Thematic Priorities
 
