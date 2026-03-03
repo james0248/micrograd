@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -151,6 +152,98 @@ impl Value {
         let x = self.data();
         let out = if x > 0.0 { x } else { 0.0 };
         Value::from_op(out, Op::Relu, vec![self.clone()])
+    }
+
+    pub fn backward(&self) {
+        let mut topo = Vec::new();
+        let mut visited = HashSet::new();
+        self.build_topo(&mut visited, &mut topo);
+
+        self.set_grad(1.0);
+        for node in topo.into_iter().rev() {
+            node.backward_step();
+        }
+    }
+
+    fn build_topo(&self, visited: &mut HashSet<usize>, topo: &mut Vec<Value>) {
+        if !visited.insert(self.id()) {
+            return;
+        }
+
+        for parent in self.parents() {
+            parent.build_topo(visited, topo);
+        }
+        topo.push(self.clone());
+    }
+
+    fn backward_step(&self) {
+        let (op, parents, out_grad, out_data) = {
+            let inner = self.0.borrow();
+            (inner.op, inner.parents.clone(), inner.grad, inner.data)
+        };
+
+        match op {
+            Some(Op::Add) => {
+                if let [a, b] = parents.as_slice() {
+                    a.add_grad(out_grad);
+                    b.add_grad(out_grad);
+                }
+            }
+            Some(Op::Mul) => {
+                if let [a, b] = parents.as_slice() {
+                    let a_data = a.data();
+                    let b_data = b.data();
+                    a.add_grad(b_data * out_grad);
+                    b.add_grad(a_data * out_grad);
+                }
+            }
+            Some(Op::Sub) => {
+                if let [a, b] = parents.as_slice() {
+                    a.add_grad(out_grad);
+                    b.add_grad(-out_grad);
+                }
+            }
+            Some(Op::Div) => {
+                if let [a, b] = parents.as_slice() {
+                    let a_data = a.data();
+                    let b_data = b.data();
+                    a.add_grad((1.0 / b_data) * out_grad);
+                    b.add_grad((-a_data / (b_data * b_data)) * out_grad);
+                }
+            }
+            Some(Op::Neg) => {
+                if let [a] = parents.as_slice() {
+                    a.add_grad(-out_grad);
+                }
+            }
+            Some(Op::Pow) => {
+                if let [base, exponent] = parents.as_slice() {
+                    let base_data = base.data();
+                    let exponent_data = exponent.data();
+                    let base_grad = exponent_data * base_data.powf(exponent_data - 1.0) * out_grad;
+                    let exponent_grad = out_data * base_data.ln() * out_grad;
+                    base.add_grad(base_grad);
+                    exponent.add_grad(exponent_grad);
+                }
+            }
+            Some(Op::Tanh) => {
+                if let [a] = parents.as_slice() {
+                    a.add_grad((1.0 - out_data * out_data) * out_grad);
+                }
+            }
+            Some(Op::Exp) => {
+                if let [a] = parents.as_slice() {
+                    a.add_grad(out_data * out_grad);
+                }
+            }
+            Some(Op::Relu) => {
+                if let [a] = parents.as_slice() {
+                    let local = if a.data() > 0.0 { 1.0 } else { 0.0 };
+                    a.add_grad(local * out_grad);
+                }
+            }
+            None => {}
+        }
     }
 }
 
@@ -314,5 +407,121 @@ mod tests {
         assert_eq!(out.op(), Some(Op::Tanh));
         assert_eq!(out.parents().len(), 1);
         assert_eq!(out.parents()[0].id(), n.id());
+    }
+
+    #[test]
+    fn backward_add_basic() {
+        let a = Value::new(2.0);
+        let b = Value::new(3.0);
+        let out = a.add(&b);
+
+        out.backward();
+
+        assert_close(out.grad(), 1.0, 1e-12);
+        assert_close(a.grad(), 1.0, 1e-12);
+        assert_close(b.grad(), 1.0, 1e-12);
+    }
+
+    #[test]
+    fn backward_mul_basic() {
+        let a = Value::new(2.0);
+        let b = Value::new(3.0);
+        let out = a.mul(&b);
+
+        out.backward();
+
+        assert_close(a.grad(), 3.0, 1e-12);
+        assert_close(b.grad(), 2.0, 1e-12);
+    }
+
+    #[test]
+    fn backward_chain_rule_composed() {
+        let x = Value::new(2.0);
+        let y = Value::new(-3.0);
+        let z = Value::new(10.0);
+
+        let q = x.mul(&y);
+        let n = q.add(&z);
+        let out = n.tanh();
+
+        out.backward();
+
+        let local = 1.0 - out.data() * out.data();
+        assert_close(x.grad(), y.data() * local, 1e-12);
+        assert_close(y.grad(), x.data() * local, 1e-12);
+        assert_close(z.grad(), local, 1e-12);
+    }
+
+    #[test]
+    fn backward_shared_subgraph_accumulates() {
+        let a = Value::new(2.0);
+        let b = Value::new(3.0);
+        let q = a.mul(&b);
+        let out = q.add(&q);
+
+        out.backward();
+
+        assert_close(q.grad(), 2.0, 1e-12);
+        assert_close(a.grad(), 6.0, 1e-12);
+        assert_close(b.grad(), 4.0, 1e-12);
+    }
+
+    #[test]
+    fn backward_pow_value_based() {
+        let base = Value::new(2.0);
+        let exponent = Value::new(3.0);
+        let out = base.pow(&exponent);
+
+        out.backward();
+
+        assert_close(base.grad(), 12.0, 1e-12);
+        assert_close(exponent.grad(), 8.0 * 2.0_f64.ln(), 1e-12);
+    }
+
+    #[test]
+    fn backward_relu_tanh_exp() {
+        let neg = Value::new(-1.0);
+        let neg_out = neg.relu();
+        neg_out.backward();
+        assert_close(neg.grad(), 0.0, 1e-12);
+
+        let pos = Value::new(2.0);
+        let pos_out = pos.relu();
+        pos_out.backward();
+        assert_close(pos.grad(), 1.0, 1e-12);
+
+        let t = Value::new(0.5);
+        let t_out = t.tanh();
+        t_out.backward();
+        assert_close(t.grad(), 1.0 - t_out.data() * t_out.data(), 1e-12);
+
+        let e = Value::new(1.0);
+        let e_out = e.exp();
+        e_out.backward();
+        assert_close(e.grad(), e_out.data(), 1e-12);
+    }
+
+    fn eval_scalar_expr(x: f64) -> f64 {
+        let x_node = Value::new(x);
+        let xx = x_node.mul(&x_node);
+        let s = xx.add(&x_node);
+        s.tanh().data()
+    }
+
+    #[test]
+    fn finite_difference_sanity() {
+        let x0 = 1.5;
+        let x = Value::new(x0);
+        let xx = x.mul(&x);
+        let s = xx.add(&x);
+        let out = s.tanh();
+
+        out.backward();
+        let analytical = x.grad();
+
+        let h = 1e-6;
+        let numerical = (eval_scalar_expr(x0 + h) - eval_scalar_expr(x0 - h)) / (2.0 * h);
+
+        assert_close(analytical, numerical, 1e-6);
     }
 }
