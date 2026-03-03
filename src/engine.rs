@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::ops::{Add, Div, Mul, Neg, Sub};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -247,6 +248,86 @@ impl Value {
     }
 }
 
+impl Add for Value {
+    type Output = Value;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Value::add(&self, &rhs)
+    }
+}
+
+impl Add for &Value {
+    type Output = Value;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Value::add(self, rhs)
+    }
+}
+
+impl Sub for Value {
+    type Output = Value;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        Value::sub(&self, &rhs)
+    }
+}
+
+impl Sub for &Value {
+    type Output = Value;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        Value::sub(self, rhs)
+    }
+}
+
+impl Mul for Value {
+    type Output = Value;
+
+    fn mul(self, rhs: Self) -> Self::Output {
+        Value::mul(&self, &rhs)
+    }
+}
+
+impl Mul for &Value {
+    type Output = Value;
+
+    fn mul(self, rhs: Self) -> Self::Output {
+        Value::mul(self, rhs)
+    }
+}
+
+impl Div for Value {
+    type Output = Value;
+
+    fn div(self, rhs: Self) -> Self::Output {
+        Value::div(&self, &rhs)
+    }
+}
+
+impl Div for &Value {
+    type Output = Value;
+
+    fn div(self, rhs: Self) -> Self::Output {
+        Value::div(self, rhs)
+    }
+}
+
+impl Neg for Value {
+    type Output = Value;
+
+    fn neg(self) -> Self::Output {
+        Value::neg(&self)
+    }
+}
+
+impl Neg for &Value {
+    type Output = Value;
+
+    fn neg(self) -> Self::Output {
+        Value::neg(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Op, Value};
@@ -410,6 +491,47 @@ mod tests {
     }
 
     #[test]
+    fn operator_forward_values_and_metadata() {
+        let a = Value::new(4.0);
+        let b = Value::new(2.0);
+
+        let add = &a + &b;
+        assert_eq!(add.data(), 6.0);
+        assert_eq!(add.op(), Some(Op::Add));
+
+        let sub = &a - &b;
+        assert_eq!(sub.data(), 2.0);
+        assert_eq!(sub.op(), Some(Op::Sub));
+
+        let mul = &a * &b;
+        assert_eq!(mul.data(), 8.0);
+        assert_eq!(mul.op(), Some(Op::Mul));
+
+        let div = &a / &b;
+        assert_eq!(div.data(), 2.0);
+        assert_eq!(div.op(), Some(Op::Div));
+
+        let neg = -&a;
+        assert_eq!(neg.data(), -4.0);
+        assert_eq!(neg.op(), Some(Op::Neg));
+    }
+
+    #[test]
+    fn owned_operator_forms_work() {
+        let a = Value::new(4.0);
+        let b = Value::new(2.0);
+
+        let add = a.clone() + b.clone();
+        assert_eq!(add.data(), 6.0);
+
+        let mul = a.clone() * b.clone();
+        assert_eq!(mul.data(), 8.0);
+
+        let neg = -a.clone();
+        assert_eq!(neg.data(), -4.0);
+    }
+
+    #[test]
     fn backward_add_basic() {
         let a = Value::new(2.0);
         let b = Value::new(3.0);
@@ -499,6 +621,41 @@ mod tests {
         let e_out = e.exp();
         e_out.backward();
         assert_close(e.grad(), e_out.data(), 1e-12);
+    }
+
+    #[test]
+    fn operator_backward_parity_with_methods() {
+        let mx = Value::new(2.0);
+        let my = Value::new(-3.0);
+        let mz = Value::new(10.0);
+        let m_out = mx.mul(&my).add(&mz).tanh();
+        m_out.backward();
+
+        let ox = Value::new(2.0);
+        let oy = Value::new(-3.0);
+        let oz = Value::new(10.0);
+        let oq = &ox * &oy;
+        let o_out = (&oq + &oz).tanh();
+        o_out.backward();
+
+        assert_close(m_out.data(), o_out.data(), 1e-12);
+        assert_close(mx.grad(), ox.grad(), 1e-12);
+        assert_close(my.grad(), oy.grad(), 1e-12);
+        assert_close(mz.grad(), oz.grad(), 1e-12);
+    }
+
+    #[test]
+    fn operator_shared_subgraph_accumulates() {
+        let a = Value::new(2.0);
+        let b = Value::new(3.0);
+        let q = &a * &b;
+        let out = &q + &q;
+
+        out.backward();
+
+        assert_close(q.grad(), 2.0, 1e-12);
+        assert_close(a.grad(), 6.0, 1e-12);
+        assert_close(b.grad(), 4.0, 1e-12);
     }
 
     fn eval_scalar_expr(x: f64) -> f64 {

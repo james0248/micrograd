@@ -2,10 +2,12 @@
 
 ## Stage Tracking
 
-- Current Stage: `Stage 4 - Backward Engine`
+- Current Stage: `Stage 6 - Tiny NN + Training Demo`
 - Last Updated: `2026-03-03`
-- Next Gate: `Stage 4 acceptance`
+- Next Gate: `Stage 6 acceptance`
 - Stage 3 Status: `Accepted (forward ops + tests complete on 2026-03-03)`
+- Stage 4 Status: `Accepted (backward engine + tests complete on 2026-03-03)`
+- Stage 5 Status: `Accepted (operator ergonomics + parity tests complete on 2026-03-03)`
 
 ## Thematic Priorities
 
