@@ -2,9 +2,9 @@
 
 ## Stage Tracking
 
-- Current Stage: `Stage 2 - Value Core`
+- Current Stage: `Stage 3 - Forward Ops`
 - Last Updated: `2026-03-03`
-- Next Gate: `Stage 2 acceptance`
+- Next Gate: `Stage 3 acceptance`
 
 ## Thematic Priorities
 
