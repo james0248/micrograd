@@ -2,6 +2,7 @@
 name = "micrograd"
 version = "0.1.0"
 edition = "2024"
+default-run = "micrograd"
 
 [dependencies]
 rand = "0.8"

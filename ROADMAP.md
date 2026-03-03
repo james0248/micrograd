@@ -2,13 +2,23 @@
 
 ## Stage Tracking
 
-- Current Stage: `Stage 7 - Final Verification`
+- Current Stage: `Complete (Post Stage 9D)`
 - Last Updated: `2026-03-03`
-- Next Gate: `Stage 7 acceptance`
+- Next Gate: `None`
 - Stage 3 Status: `Accepted (forward ops + tests complete on 2026-03-03)`
 - Stage 4 Status: `Accepted (backward engine + tests complete on 2026-03-03)`
 - Stage 5 Status: `Accepted (operator ergonomics + parity tests complete on 2026-03-03)`
-- Stage 6 Status: `Accepted (tiny NN + deterministic training demo complete on 2026-03-03)`
+- Stage 6 Status: `Accepted (scalar MLP + noisy XOR sigmoid/BCE training demo with eval split complete on 2026-03-03)`
+- Stage 7 Status: `Accepted (full verification + doc sync complete on 2026-03-03)`
+- Stage 8A Status: `Accepted (roadmap lock for tape v2 + gated migration on 2026-03-03)`
+- Stage 8B Status: `Accepted (isolated engine_v2 + parity/lifecycle tests complete on 2026-03-03)`
+- Stage 8C Status: `Accepted (nn_v2 + v2_demo integration rehearsal complete on 2026-03-03)`
+- Stage 8D Status: `Accepted (default path migrated to v2 and validated on 2026-03-03)`
+- Stage 8E Status: `Accepted (legacy v1 quarantined + docs synced on 2026-03-03)`
+- Stage 9A Status: `Accepted (explicit context lifecycle + naming lock on 2026-03-03)`
+- Stage 9B Status: `Accepted (engine_v2 context runtime refactor complete on 2026-03-03)`
+- Stage 9C Status: `Accepted (demo/test integration migrated to with_grad/no_grad on 2026-03-03)`
+- Stage 9D Status: `Accepted (verification and doc sync complete on 2026-03-03)`
 
 ## Thematic Priorities
 
@@ -21,7 +31,7 @@
 ## Done Target
 
 - `cargo test` passes for engine and training-related checks.
-- `cargo run` executes a tiny deterministic training demo and shows a downward loss trend.
+- `cargo run` executes deterministic noisy XOR classification training and reports train/eval BCE + accuracy.
 - Implementation remains scalar-only.
 - Dependency rule is respected (`rand` only).
 
@@ -99,11 +109,12 @@ Scope:
 
 - Implement minimal `Neuron`, `Layer`, `MLP` on scalar `Value`.
 - Add deterministic initialization via `rand`.
-- Run a tiny in-code training loop from `main`.
+- Run a tiny in-code training loop from `main` with sigmoid + BCE.
+- Add a held-out eval split and report train/eval metrics.
 
 Acceptance:
 
-- Demo runs and prints improving loss across epochs.
+- Demo runs and prints improving BCE/accuracy trends across epochs.
 
 ### Stage 7 - Final Verification
 
@@ -116,32 +127,143 @@ Acceptance:
 
 - `cargo test` and `cargo run` satisfy done target criteria.
 
+### Stage 8A - Roadmap Lock
+
+Scope:
+
+- Lock architecture direction to a PyTorch-like hidden global tape (`no Rc`, `no RefCell`) for v2.
+- Define gated rollout: isolated v2 first, migration second.
+
+Acceptance:
+
+- `ROADMAP.md` includes Stage 8A-8E with clear gates and acceptance criteria.
+
+### Stage 8B - Engine V2 (Isolated)
+
+Scope:
+
+- Implement `engine_v2` in parallel with current engine.
+- Keep existing `engine` path untouched during this stage.
+- Build parity tests for v2 (`tests/engine_v2.rs`) including lifecycle safety checks.
+
+Acceptance:
+
+- `engine_v2` tests pass.
+- Existing default engine path remains functional and unchanged.
+
+### Stage 8C - V2 Integration Rehearsal
+
+Scope:
+
+- Implement `nn_v2` and a dedicated v2 demo entrypoint.
+- Validate full training loop behavior on noisy XOR with train/eval reporting.
+
+Acceptance:
+
+- `cargo run --bin v2_demo` shows improving BCE/accuracy trend.
+- `tests/nn_v2.rs` passes.
+
+### Stage 8D - Migration Cutover
+
+Scope:
+
+- Switch default `engine`/`nn`/`main` to v2 implementation after isolated validation.
+- Preserve current public behavior and interfaces where possible.
+
+Acceptance:
+
+- Default `cargo test` and `cargo run` pass on v2-backed path.
+
+### Stage 8E - Post-Migration Cleanup
+
+Scope:
+
+- Remove legacy engine path (or quarantine as reference module) and sync docs.
+- Confirm limitations and stage status reflect post-migration state.
+
+Acceptance:
+
+- No ambiguous dual-default engine path.
+- Docs and stage tracking are consistent.
+
+Completion note:
+
+- Legacy implementation is quarantined in `engine_v1`/`nn_v1` while default exports use v2.
+
+### Stage 9A - Context Lifecycle Lock
+
+Scope:
+
+- Lock lifecycle model to explicit contexts: `with_grad(...)` for training graph recording and `no_grad(...)` for eval/non-recording execution.
+- Drop `*_scope` naming from the public API direction.
+- Keep scalar scope and dependency constraints unchanged.
+
+Acceptance:
+
+- Roadmap and implementation both use plain `with_grad` / `no_grad` naming.
+
+### Stage 9B - Engine V2 Context Runtime
+
+Scope:
+
+- Refactor `engine_v2` to require active context for graph-building ops.
+- Remove implicit always-on graph recording assumptions.
+- Bind temp-node lifetime to context boundaries and keep parameter lifetime persistent.
+
+Acceptance:
+
+- `engine_v2` supports strict-context execution with stale-handle safety and non-nested `with_grad`.
+
+### Stage 9C - Integration Migration
+
+Scope:
+
+- Move demo and tests to context-bounded execution.
+- Keep training in `with_grad` and evaluation in `no_grad`.
+- Ensure multi-loss behavior works inside the same `with_grad` context.
+
+Acceptance:
+
+- `main`, `v2_demo`, and test suites run on the explicit context model.
+
+### Stage 9D - Verification + Sync
+
+Scope:
+
+- Run final checks and align roadmap status with implemented behavior.
+- Confirm performance-lifecycle notes reflect context-bounded graph memory.
+
+Acceptance:
+
+- `cargo test`, `cargo run`, and `cargo run --bin v2_demo` pass on the Stage 9 model.
+
 ## Performance Plan
 
-### 1) Baseline Measurement (after correctness baseline)
+### 1) Baseline Measurement (v1)
 
-- Time forward/backward/epoch loop using `std::time::Instant`.
-- Record baseline timings in roadmap notes or run log.
+- Record current v1 timings (`cargo run` training loop) using `std::time::Instant`.
+- Keep seed/dataset/epoch settings identical for v1-v2 comparisons.
 
-### 2) Hotspot Identification
+### 2) V2 Cost Targets
 
-- Inspect these expensive paths.
-- Frequent `clone` calls on graph values.
-- Repeated `borrow`/`borrow_mut` churn.
-- Repeated topo vector allocations.
-- Repeated graph traversal overhead.
+- Remove `Rc` reference counting overhead.
+- Remove `RefCell` runtime borrow checks and churn.
+- Reduce per-op temporary allocations where possible.
 
-### 3) Low-Risk Optimizations
+### 3) Isolated V2 Measurement
 
-- Pre-allocate traversal vectors where possible.
-- Shorten mutable borrow lifetimes and reduce repeated borrows.
-- Remove avoidable temporary allocations/clones.
-- Reuse buffers across training iterations when safe.
+- Measure v2 in isolation (`engine_v2` + `v2_demo`) with same workload.
+- Compare epoch-level timings and memory growth behavior against v1.
 
-### 4) Structural Optimization Track (Post Day-1)
+### 3.5) Context-Bounded Memory Policy
 
-- Evaluate arena/index-based graph storage as a follow-up branch.
-- Keep this out of day-1 critical path unless baseline is too slow.
+- Build and backprop inside `with_grad(...)`; clear temp graph at context exit.
+- Use `no_grad(...)` for eval/inference to avoid recording op parents.
+- Prevent unbounded tape growth across epochs by design.
+
+### 4) Migration Guardrail
+
+- Do not migrate default path until v2 parity tests and demo behavior are green.
 
 ### 5) Correctness Guardrails
 
@@ -157,8 +279,13 @@ Acceptance:
 
 - `Value` wrapper type for scalar data + grad + graph edges.
 - `backward()` autograd entrypoint.
+- `backward_with_options(retain_graph: bool)` kept for compatibility while lifecycle is context-bounded.
 - Trait ops (`Add`, `Mul`, `Neg`, `Sub`, `Div`) after method-based ops.
-- `Neuron::new`, `Layer::new`, `MLP::new`, `forward`, `parameters`.
+- Unary value ops include `tanh`, `exp`, `log`, `relu`.
+- `Value::parameter(data)` for persistent trainable scalars.
+- `with_grad(|| ...)` helper for explicit graph-recording context.
+- `no_grad(|| ...)` helper for eval/inference without graph growth.
+- `Mlp::new(dims: &[usize], seed: u64)` and tuple parameters API `(weights, biases)`.
 
 ## Required Test Scenarios
 
@@ -166,7 +293,14 @@ Acceptance:
 - Backward chain-rule correctness on known expressions.
 - Gradient accumulation correctness for reused nodes.
 - Finite-difference sanity checks vs analytical gradients.
-- Training smoke test with measurable loss improvement.
+- Training smoke test with measurable BCE decrease on noisy XOR data.
+- Deterministic initialization checks and parameter-shape checks.
+
+## Final Limitations
+
+- Scalar-only autograd and MLP implementation (no tensors/batching).
+- Hidden global runtime is thread-local with explicit `with_grad` / `no_grad` context boundaries.
+- Single-process demo training with full-dataset gradient descent (no mini-batch support).
 
 ## Milestone Completion Note
 

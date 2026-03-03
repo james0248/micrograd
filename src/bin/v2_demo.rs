@@ -1,5 +1,5 @@
-use micrograd::engine::{Value, no_grad, with_grad};
-use micrograd::nn::Mlp;
+use micrograd::engine_v2::{Value, no_grad, with_grad};
+use micrograd::nn_v2::Mlp;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
@@ -26,7 +26,7 @@ fn generate_xor_dataset(samples_per_corner: usize, noise: f64, seed: u64) -> Vec
 
 fn sigmoid(logit: &Value) -> Value {
     let one = Value::new(1.0);
-    let denom = &one + &(-logit).exp();
+    let denom = one + (-*logit).exp();
     one.div(&denom)
 }
 
@@ -89,7 +89,7 @@ fn main() {
             let mut total_loss = Value::new(0.0);
             let mut correct = 0usize;
             for (x_raw, y_raw) in train_dataset.iter().copied() {
-                let x: Vec<Value> = vec![Value::new(x_raw[0]), Value::new(x_raw[1])];
+                let x = vec![Value::new(x_raw[0]), Value::new(x_raw[1])];
                 let logit = mlp.forward(&x).into_iter().next().expect("single output");
                 let prob = sigmoid(&logit);
                 let pred_label = if prob.data() >= 0.5 { 1.0 } else { 0.0 };
@@ -97,7 +97,7 @@ fn main() {
                     correct += 1;
                 }
                 let sample_loss = bce_from_prob(&prob, y_raw);
-                total_loss = &total_loss + &sample_loss;
+                total_loss = total_loss + sample_loss;
             }
 
             let mean_loss = total_loss.div(&Value::new(train_dataset.len() as f64));

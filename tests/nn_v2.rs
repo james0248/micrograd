@@ -1,8 +1,8 @@
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use micrograd::engine::{Value, no_grad, reset_state, with_grad};
-use micrograd::nn::{Mlp, Neuron};
+use micrograd::engine_v2::{Value, no_grad, reset_state, with_grad};
+use micrograd::nn_v2::{Mlp, Neuron};
 
 fn xor_dataset(samples_per_corner: usize, noise: f64, seed: u64) -> Vec<([f64; 2], f64)> {
     let mut rng = StdRng::seed_from_u64(seed);
@@ -32,7 +32,7 @@ fn mean_loss_value(mlp: &Mlp, dataset: &[([f64; 2], f64)]) -> Value {
         let x = vec![Value::new(x_raw[0]), Value::new(x_raw[1])];
         let logit = mlp.forward(&x).into_iter().next().expect("single output");
         let prob = sigmoid(&logit);
-        total_loss = &total_loss + &bce_from_prob(&prob, y_raw);
+        total_loss = total_loss + bce_from_prob(&prob, y_raw);
     }
 
     total_loss.div(&Value::new(dataset.len() as f64))
@@ -44,7 +44,7 @@ fn mean_loss_scalar(mlp: &Mlp, dataset: &[([f64; 2], f64)]) -> f64 {
 
 fn sigmoid(logit: &Value) -> Value {
     let one = Value::new(1.0);
-    let denom = &one + &(-logit).exp();
+    let denom = one + (-*logit).exp();
     one.div(&denom)
 }
 

@@ -17,7 +17,8 @@
 
 ## Architecture Defaults
 
-- Start with an internal graph model based on `Rc<RefCell<_>>` wrapped by a `Value` type.
+- Use a hidden thread-local runtime with explicit `with_grad(...)` / `no_grad(...)` contexts.
+- Represent `Value` as lightweight handles into runtime-managed parameter/temp storage.
 - Use DAG topological traversal for `backward`.
 - Make gradient accumulation explicit and test it on shared subgraphs.
 

@@ -1,4 +1,4 @@
-use micrograd::engine::{Op, Value, clear_graph, no_grad, reset_state, stats, with_grad};
+use micrograd::engine_v2::{Op, Value, clear_graph, no_grad, reset_state, stats, with_grad};
 
 fn assert_close(actual: f64, expected: f64, eps: f64) {
     assert!(
