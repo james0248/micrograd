@@ -17,10 +17,15 @@ fn eval_scalar_expr(x: f64) -> f64 {
 }
 
 #[test]
-fn value_new_requires_active_context() {
+fn value_new_works_on_default_tape() {
     reset_state();
-    let result = std::panic::catch_unwind(|| Value::new(1.0));
-    assert!(result.is_err(), "Value::new should panic outside context");
+    let v = Value::new(1.0);
+    assert_close(v.data(), 1.0, 1e-12);
+
+    let snapshot = stats();
+    assert_eq!(snapshot.generation, 0);
+    assert_eq!(snapshot.context_depth, 0);
+    assert!(snapshot.with_grad_active);
 }
 
 #[test]
@@ -150,14 +155,12 @@ fn finite_difference_sanity() {
     reset_state();
     let x0 = 1.5;
 
-    let analytical = with_grad(|| {
-        let x = Value::new(x0);
-        let xx = x.mul(&x);
-        let s = xx.add(&x);
-        let out = s.tanh();
-        out.backward();
-        x.grad()
-    });
+    let x = Value::new(x0);
+    let xx = x.mul(&x);
+    let s = xx.add(&x);
+    let out = s.tanh();
+    out.backward();
+    let analytical = x.grad();
 
     let h = 1e-6;
     let numerical = (eval_scalar_expr(x0 + h) - eval_scalar_expr(x0 - h)) / (2.0 * h);
@@ -202,75 +205,109 @@ fn no_grad_inside_with_grad_restores_outer_graph() {
 }
 
 #[test]
-fn with_grad_cannot_be_nested() {
+fn nested_with_grad_is_allowed() {
     reset_state();
-    let result = std::panic::catch_unwind(|| {
+    with_grad(|| {
+        let outer = Value::new(2.0);
+
         with_grad(|| {
-            with_grad(|| {
-                let _ = Value::new(1.0);
-            });
+            let inner = outer.mul(&Value::new(3.0));
+            assert_close(inner.data(), 6.0, 1e-12);
+        });
+
+        let z = outer.mul(&outer);
+        z.backward();
+        assert_close(outer.grad(), 4.0, 1e-12);
+    });
+}
+
+#[test]
+fn inner_scope_values_are_stale_after_exit() {
+    reset_state();
+
+    with_grad(|| {
+        let inner = with_grad(|| Value::new(5.0));
+        let stale = std::panic::catch_unwind(|| inner.data());
+        assert!(
+            stale.is_err(),
+            "inner-scope value should be stale after exit"
+        );
+    });
+}
+
+#[test]
+fn backward_on_default_tape_works() {
+    reset_state();
+
+    let a = Value::new(2.0);
+    let b = Value::new(3.0);
+    let out = a.mul(&b);
+    out.backward();
+
+    assert_close(a.grad(), 3.0, 1e-12);
+    assert_close(b.grad(), 2.0, 1e-12);
+}
+
+#[test]
+fn backward_on_no_grad_value_panics() {
+    reset_state();
+
+    let result = std::panic::catch_unwind(|| {
+        no_grad(|| {
+            let a = Value::new(2.0);
+            let b = Value::new(3.0);
+            let out = a.mul(&b);
+            out.backward();
         });
     });
-    assert!(result.is_err(), "nested with_grad should panic");
+    assert!(result.is_err(), "backward on no_grad value should panic");
 }
 
 #[test]
-fn temps_are_stale_after_context_exit() {
+fn ancestor_root_backward_allowed_while_nested() {
     reset_state();
-    let y = with_grad(|| {
-        let a = Value::new(2.0);
-        let b = Value::new(3.0);
-        a.mul(&b)
+
+    with_grad(|| {
+        let x = Value::new(2.0);
+        let root = x.mul(&x);
+
+        with_grad(|| {
+            let _inner = x.mul(&Value::new(3.0));
+            root.backward();
+        });
+
+        assert_close(x.grad(), 4.0, 1e-12);
     });
-
-    let stale = std::panic::catch_unwind(|| y.data());
-    assert!(stale.is_err(), "temp from closed context should be stale");
-}
-
-#[test]
-fn backward_requires_with_grad_context() {
-    reset_state();
-    let out = with_grad(|| {
-        let a = Value::new(2.0);
-        let b = Value::new(3.0);
-        a.mul(&b)
-    });
-
-    let result = std::panic::catch_unwind(|| out.backward());
-    assert!(result.is_err(), "backward should panic outside with_grad");
 }
 
 #[test]
 fn backward_with_options_is_compatible() {
     reset_state();
-    with_grad(|| {
-        let a = Value::new(2.0);
-        let b = Value::new(3.0);
-        let out = a.mul(&b);
 
-        out.backward_with_options(true);
-        assert_close(a.grad(), 3.0, 1e-12);
-        out.backward();
-        assert_close(a.grad(), 6.0, 1e-12);
-    });
+    let a = Value::new(2.0);
+    let b = Value::new(3.0);
+    let out = a.mul(&b);
+
+    out.backward_with_options(true);
+    assert_close(a.grad(), 3.0, 1e-12);
+    out.backward();
+    assert_close(a.grad(), 6.0, 1e-12);
 }
 
 #[test]
-fn two_losses_in_same_context_work() {
+fn two_losses_in_same_tape_work() {
     reset_state();
     let w = Value::parameter(1.5);
 
-    with_grad(|| {
-        let x1 = Value::new(2.0);
-        let l1 = w.mul(&x1);
-        l1.backward();
-        assert_close(w.grad(), 2.0, 1e-12);
+    let x1 = Value::new(2.0);
+    let l1 = w.mul(&x1);
+    l1.backward();
+    assert_close(w.grad(), 2.0, 1e-12);
 
-        let x2 = Value::new(-3.0);
-        let l2 = w.mul(&x2);
-        l2.backward();
-        assert_close(w.grad(), -1.0, 1e-12);
-    });
+    let x2 = Value::new(-3.0);
+    let l2 = w.mul(&x2);
+    l2.backward();
+    assert_close(w.grad(), -1.0, 1e-12);
 }
 
 #[test]
@@ -291,4 +328,61 @@ fn parameters_survive_context_cleanup_and_clear_graph() {
 
     clear_graph();
     assert_close(p.data(), 3.0, 1e-12);
+}
+
+#[test]
+fn clear_graph_panics_with_active_scope() {
+    reset_state();
+
+    let result = std::panic::catch_unwind(|| {
+        with_grad(|| {
+            clear_graph();
+        });
+    });
+
+    assert!(
+        result.is_err(),
+        "clear_graph should panic inside active scope"
+    );
+}
+
+#[test]
+fn stats_temp_count_includes_all_active_tapes() {
+    reset_state();
+
+    with_grad(|| {
+        let _outer_node = Value::new(1.0);
+        let outer = stats();
+        let outer_temp_count = outer.temp_count;
+
+        assert_eq!(outer.context_depth, 1);
+        assert!(outer_temp_count >= 1);
+
+        with_grad(|| {
+            let _inner_node = Value::new(2.0);
+            let nested = stats();
+            assert_eq!(nested.context_depth, 2);
+            assert_eq!(nested.temp_count, outer_temp_count + 1);
+        });
+
+        let after_nested = stats();
+        assert_eq!(after_nested.context_depth, 1);
+        assert_eq!(after_nested.temp_count, outer_temp_count);
+    });
+}
+
+#[test]
+fn deep_chain_backward_stays_correct() {
+    reset_state();
+
+    let x0 = Value::new(1.25);
+    let mut out = x0;
+
+    for _ in 0..8000 {
+        out = out.mul(&Value::new(1.0001));
+    }
+
+    out.backward();
+    assert!(x0.grad().is_finite(), "deep-chain grad should be finite");
+    assert!(x0.grad() > 0.0, "deep-chain grad should stay positive");
 }
