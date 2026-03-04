@@ -1,5 +1,5 @@
 fn main() {
     if let Err(err) = micrograd::tensor_mnist::run() {
-        panic!("micrograd failed: {err}");
+        panic!("tensor_mnist failed: {err}");
     }
 }

@@ -2,7 +2,7 @@
 
 ## Stage Tracking
 
-- Current Stage: `Complete (Post Stage 10C)`
+- Current Stage: `Complete (Post Stage 12D)`
 - Last Updated: `2026-03-04`
 - Next Gate: `None`
 - Stage 3 Status: `Accepted (forward ops + tests complete on 2026-03-03)`
@@ -22,6 +22,17 @@
 - Stage 10A Status: `Accepted (MNIST CSV loader + generic split utility complete on 2026-03-04)`
 - Stage 10B Status: `Accepted (default main migrated from XOR demo to MNIST training loop on 2026-03-04)`
 - Stage 10C Status: `Accepted (MNIST data/split tests + shape verification complete on 2026-03-04)`
+- Stage 11A Status: `Accepted (rank-2 tensor autograd core + fused CE op complete on 2026-03-04)`
+- Stage 11B Status: `Accepted (tensor MLP + batched training pipeline complete on 2026-03-04)`
+- Stage 11C Status: `Accepted (tensor engine/nn test coverage and verification complete on 2026-03-04)`
+- Stage 11D Status: `Accepted (default main cut over to tensor MNIST runner on 2026-03-04)`
+- Stage 11E Status: `Accepted (tensor CE moved to losses module and composed from core ops on 2026-03-04)`
+- Stage 11F Status: `Accepted (SGD update logic moved from tensor core into optimizer module on 2026-03-04)`
+- Stage 11G Status: `Accepted (tensor training/tests rewired to losses+optimizer modules on 2026-03-04)`
+- Stage 12A Status: `Accepted (matmul kernels extracted to dedicated tensor kernels module on 2026-03-04)`
+- Stage 12B Status: `Accepted (scoped-thread parallel matmul integrated for forward and backward paths on 2026-03-04)`
+- Stage 12C Status: `Accepted (epoch timing instrumentation added to tensor MNIST demo on 2026-03-04)`
+- Stage 12D Status: `Accepted (verification complete; multicore speed validation delegated to user machine on 2026-03-04)`
 
 ## Thematic Priorities
 
@@ -35,7 +46,7 @@
 
 - `cargo test` passes for engine and training-related checks.
 - `cargo run` executes deterministic MNIST CSV classification training and reports train/eval loss + accuracy.
-- Implementation remains scalar-only.
+- Default runnable path uses tensor autograd for batched MNIST training (scalar path retained for reference/tests).
 - Dependency rule is respected (`rand` only).
 
 ## Milestones
@@ -278,6 +289,136 @@ Acceptance:
 
 - `cargo test` passes with new data and utility tests.
 - Stage tracking reflects Stage 10 accepted state.
+
+### Stage 11A - Tensor Engine Core
+
+Scope:
+
+- Add additive tensor autograd runtime with rank-2 focused semantics.
+- Implement tensor ops required for MNIST training: `matmul`, `add_row_bias`, `relu`, `mean`, and fused `cross_entropy_with_logits`.
+- Keep context lifecycle model aligned with scalar (`with_grad` / `no_grad`) and preserve stale-handle safety.
+
+Acceptance:
+
+- Tensor forward/backward core ops are implemented and covered by dedicated tests.
+- Scalar engine path remains intact and passing.
+
+### Stage 11B - Tensor NN + Batched Pipeline
+
+Scope:
+
+- Add `nn_tensor` with one-hidden-layer MLP support over tensor parameters.
+- Add batched MNIST training runtime (`tensor_mnist`) using mini-batch SGD.
+- Keep dependency policy unchanged (`rand` + std only).
+
+Acceptance:
+
+- `cargo run --bin tensor_mnist` runs end-to-end batched training and prints train/eval metrics.
+
+### Stage 11C - Verification + Accuracy Gate
+
+Scope:
+
+- Add tensor-specific tests for shape checks, backward behavior, and training smoke.
+- Validate tensor runtime and scalar runtime together in default test suite.
+
+Acceptance:
+
+- `cargo test` passes including tensor and scalar suites.
+
+### Stage 11D - Default Path Cutover
+
+Scope:
+
+- Switch default `main` to tensor MNIST runner after tensor verification.
+- Keep scalar modules and tests for baseline comparison and learning reference.
+
+Acceptance:
+
+- `cargo run` uses tensor MNIST training path.
+
+### Stage 11E - Loss API Extraction
+
+Scope:
+
+- Remove fused CE from tensor core API/internal op dispatch.
+- Introduce `losses_tensor` module and compose CE from tensor primitives inside grad/no-grad contexts.
+- Keep tensor core focused on reusable primitive ops plus activation/reduction basics.
+
+Acceptance:
+
+- No `cross_entropy_with_logits` op/method remains in tensor core internals.
+- CE loss is available via `losses_tensor::cross_entropy_with_logits`.
+
+### Stage 11F - Optimizer Extraction
+
+Scope:
+
+- Remove parameter update step logic from tensor core.
+- Add `optim` module with `Optimizer` trait and `Sgd` implementation.
+- Drive param updates through optimizer APIs from training loops.
+
+Acceptance:
+
+- No `sgd_step` logic remains in tensor core engine/tensor APIs.
+- Training path updates weights through `optim::Sgd`.
+
+### Stage 11G - Integration + Verification
+
+Scope:
+
+- Rewire tensor training/eval and tests to use external losses and optimizer modules.
+- Add dedicated unit/integration coverage for losses and optimizer behavior.
+
+Acceptance:
+
+- `cargo test` passes with new losses/optimizer suites.
+- Default tensor training path compiles and runs with extracted module boundaries.
+
+### Stage 12A - Tensor Kernel Extraction
+
+Scope:
+
+- Move matmul compute paths into dedicated `tensor/kernels` module.
+- Keep tensor API surface stable while isolating low-level compute details.
+
+Acceptance:
+
+- `Tensor::matmul` and `MatMul2D` backward rely on kernel helpers from `tensor/kernels`.
+
+### Stage 12B - Scoped-Thread Matmul
+
+Scope:
+
+- Implement safe-Rust multithreading for matmul via `std::thread::scope`.
+- Apply row-chunk parallelism to forward matmul and both matmul backward gradient paths.
+- Use transposed-right-matrix kernel layout for cache-friendly contiguous dot products.
+
+Acceptance:
+
+- Threaded kernel path is active for matmul forward/backward without changing public APIs.
+
+### Stage 12C - Timing Instrumentation
+
+Scope:
+
+- Add epoch-level wall-clock timing to tensor MNIST training logs.
+- Keep training metrics and hyperparameters unchanged for before/after comparison.
+
+Acceptance:
+
+- `cargo run` prints per-epoch timing (`epoch_time_ms`) alongside loss/accuracy metrics.
+
+### Stage 12D - Verification + Deployment Note
+
+Scope:
+
+- Validate correctness via full test suite after threaded kernel integration.
+- Document that speedup validation is done on user multicore hardware when local runtime reports single logical CPU.
+
+Acceptance:
+
+- `cargo test` passes post-threading refactor.
 
 ## Performance Plan
 
