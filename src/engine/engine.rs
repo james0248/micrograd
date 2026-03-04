@@ -3,6 +3,10 @@ use std::collections::{BinaryHeap, HashSet};
 
 use super::Op;
 use super::kernels::{matmul_backward_da, matmul_backward_db};
+use super::shape::{
+    broadcast_shape, broadcast_strides_for, contiguous_strides, for_each_index, numel,
+    offset_from_coords, reduced_offset_from_input_coords, reduced_shape,
+};
 use super::tensor::Tensor;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -108,19 +112,6 @@ impl PartialOrd for TempWork {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
-}
-
-fn numel(shape: &[usize]) -> usize {
-    shape.iter().product()
-}
-
-fn shape2(shape: &[usize]) -> (usize, usize) {
-    assert_eq!(shape.len(), 2, "expected rank-2 tensor, got {:?}", shape);
-    (shape[0], shape[1])
-}
-
-fn idx2(row: usize, col: usize, cols: usize) -> usize {
-    row * cols + col
 }
 
 #[derive(Debug, Clone)]
@@ -595,60 +586,199 @@ impl Engine {
         let parents = self.parents_of(node);
         let out_grad = self.grad_of(node);
         let out_data = self.data_of(node);
+        let out_shape = self.shape_of(node);
 
         match (op, parents) {
-            (Some(Op::MatMul2D), Parents::Binary(a, b)) => {
+            (Some(Op::MatMul), Parents::Binary(a, b)) => {
                 let a_shape = self.shape_of(a);
                 let b_shape = self.shape_of(b);
-                let (m, k) = shape2(&a_shape);
-                let (k_b, n) = shape2(&b_shape);
+                assert!(
+                    a_shape.len() >= 2 && b_shape.len() >= 2,
+                    "matmul backward expects rank >=2: left={:?}, right={:?}",
+                    a_shape,
+                    b_shape
+                );
+
+                let m = a_shape[a_shape.len() - 2];
+                let k = a_shape[a_shape.len() - 1];
+                let k_b = b_shape[b_shape.len() - 2];
+                let n = b_shape[b_shape.len() - 1];
                 assert_eq!(k, k_b, "matmul backward shape mismatch");
+
+                let a_batch = &a_shape[..a_shape.len() - 2];
+                let b_batch = &b_shape[..b_shape.len() - 2];
+                let batch_shape = broadcast_shape(a_batch, b_batch);
+                let mut expected_out_shape = batch_shape.clone();
+                expected_out_shape.push(m);
+                expected_out_shape.push(n);
+                assert_eq!(
+                    out_shape, expected_out_shape,
+                    "matmul backward output shape mismatch: expected {:?}, got {:?}",
+                    expected_out_shape, out_shape
+                );
 
                 let a_data = self.data_of(a);
                 let b_data = self.data_of(b);
-                let da = matmul_backward_da(&out_grad, &b_data, m, n, k);
-                let db = matmul_backward_db(&a_data, &out_grad, m, k, n);
+                let a_strides = contiguous_strides(&a_shape);
+                let b_strides = contiguous_strides(&b_shape);
+                let a_batch_strides =
+                    broadcast_strides_for(a_batch, &a_strides[..a_batch.len()], &batch_shape);
+                let b_batch_strides =
+                    broadcast_strides_for(b_batch, &b_strides[..b_batch.len()], &batch_shape);
+                let batch_strides = contiguous_strides(&batch_shape);
+
+                let a_block = m * k;
+                let b_block = k * n;
+                let out_block = m * n;
+                let mut da_total = vec![0.0; numel(&a_shape)];
+                let mut db_total = vec![0.0; numel(&b_shape)];
+
+                for_each_index(&batch_shape, |batch_coords| {
+                    let a_off = offset_from_coords(batch_coords, &a_batch_strides);
+                    let b_off = offset_from_coords(batch_coords, &b_batch_strides);
+                    let batch_off = offset_from_coords(batch_coords, &batch_strides);
+                    let out_off = batch_off * out_block;
+
+                    let g_block = &out_grad[out_off..out_off + out_block];
+                    let a_block_data = &a_data[a_off..a_off + a_block];
+                    let b_block_data = &b_data[b_off..b_off + b_block];
+
+                    let da_block = matmul_backward_da(g_block, b_block_data, m, n, k);
+                    let db_block = matmul_backward_db(a_block_data, g_block, m, k, n);
+
+                    for i in 0..a_block {
+                        da_total[a_off + i] += da_block[i];
+                    }
+                    for i in 0..b_block {
+                        db_total[b_off + i] += db_block[i];
+                    }
+                });
+
+                self.add_grad(a, &da_total);
+                self.add_grad(b, &db_total);
+            }
+            (Some(Op::Add), Parents::Binary(a, b)) => {
+                let a_shape = self.shape_of(a);
+                let b_shape = self.shape_of(b);
+                let expected_out_shape = broadcast_shape(&a_shape, &b_shape);
+                assert_eq!(
+                    out_shape, expected_out_shape,
+                    "add backward output shape mismatch: expected {:?}, got {:?}",
+                    expected_out_shape, out_shape
+                );
+
+                let a_strides = contiguous_strides(&a_shape);
+                let b_strides = contiguous_strides(&b_shape);
+                let a_bstrides = broadcast_strides_for(&a_shape, &a_strides, &out_shape);
+                let b_bstrides = broadcast_strides_for(&b_shape, &b_strides, &out_shape);
+                let mut da = vec![0.0; numel(&a_shape)];
+                let mut db = vec![0.0; numel(&b_shape)];
+
+                let mut out_i = 0usize;
+                for_each_index(&out_shape, |coords| {
+                    let ai = offset_from_coords(coords, &a_bstrides);
+                    let bi = offset_from_coords(coords, &b_bstrides);
+                    let g = out_grad[out_i];
+                    da[ai] += g;
+                    db[bi] += g;
+                    out_i += 1;
+                });
 
                 self.add_grad(a, &da);
                 self.add_grad(b, &db);
             }
-            (Some(Op::Add), Parents::Binary(a, b)) => {
-                self.add_grad(a, &out_grad);
-                self.add_grad(b, &out_grad);
-            }
             (Some(Op::Sub), Parents::Binary(a, b)) => {
-                let mut db = out_grad.clone();
-                for g in &mut db {
-                    *g = -*g;
-                }
-                self.add_grad(a, &out_grad);
+                let a_shape = self.shape_of(a);
+                let b_shape = self.shape_of(b);
+                let expected_out_shape = broadcast_shape(&a_shape, &b_shape);
+                assert_eq!(
+                    out_shape, expected_out_shape,
+                    "sub backward output shape mismatch: expected {:?}, got {:?}",
+                    expected_out_shape, out_shape
+                );
+
+                let a_strides = contiguous_strides(&a_shape);
+                let b_strides = contiguous_strides(&b_shape);
+                let a_bstrides = broadcast_strides_for(&a_shape, &a_strides, &out_shape);
+                let b_bstrides = broadcast_strides_for(&b_shape, &b_strides, &out_shape);
+                let mut da = vec![0.0; numel(&a_shape)];
+                let mut db = vec![0.0; numel(&b_shape)];
+
+                let mut out_i = 0usize;
+                for_each_index(&out_shape, |coords| {
+                    let ai = offset_from_coords(coords, &a_bstrides);
+                    let bi = offset_from_coords(coords, &b_bstrides);
+                    let g = out_grad[out_i];
+                    da[ai] += g;
+                    db[bi] -= g;
+                    out_i += 1;
+                });
+
+                self.add_grad(a, &da);
                 self.add_grad(b, &db);
             }
             (Some(Op::Mul), Parents::Binary(a, b)) => {
+                let a_shape = self.shape_of(a);
+                let b_shape = self.shape_of(b);
+                let expected_out_shape = broadcast_shape(&a_shape, &b_shape);
+                assert_eq!(
+                    out_shape, expected_out_shape,
+                    "mul backward output shape mismatch: expected {:?}, got {:?}",
+                    expected_out_shape, out_shape
+                );
+
                 let a_data = self.data_of(a);
                 let b_data = self.data_of(b);
-                assert_eq!(a_data.len(), out_grad.len(), "mul backward size mismatch");
-                assert_eq!(b_data.len(), out_grad.len(), "mul backward size mismatch");
-                let mut da = vec![0.0; out_grad.len()];
-                let mut db = vec![0.0; out_grad.len()];
-                for i in 0..out_grad.len() {
-                    da[i] = out_grad[i] * b_data[i];
-                    db[i] = out_grad[i] * a_data[i];
-                }
+                let a_strides = contiguous_strides(&a_shape);
+                let b_strides = contiguous_strides(&b_shape);
+                let a_bstrides = broadcast_strides_for(&a_shape, &a_strides, &out_shape);
+                let b_bstrides = broadcast_strides_for(&b_shape, &b_strides, &out_shape);
+                let mut da = vec![0.0; numel(&a_shape)];
+                let mut db = vec![0.0; numel(&b_shape)];
+
+                let mut out_i = 0usize;
+                for_each_index(&out_shape, |coords| {
+                    let ai = offset_from_coords(coords, &a_bstrides);
+                    let bi = offset_from_coords(coords, &b_bstrides);
+                    let g = out_grad[out_i];
+                    da[ai] += g * b_data[bi];
+                    db[bi] += g * a_data[ai];
+                    out_i += 1;
+                });
+
                 self.add_grad(a, &da);
                 self.add_grad(b, &db);
             }
             (Some(Op::Div), Parents::Binary(a, b)) => {
+                let a_shape = self.shape_of(a);
+                let b_shape = self.shape_of(b);
+                let expected_out_shape = broadcast_shape(&a_shape, &b_shape);
+                assert_eq!(
+                    out_shape, expected_out_shape,
+                    "div backward output shape mismatch: expected {:?}, got {:?}",
+                    expected_out_shape, out_shape
+                );
+
                 let a_data = self.data_of(a);
                 let b_data = self.data_of(b);
-                assert_eq!(a_data.len(), out_grad.len(), "div backward size mismatch");
-                assert_eq!(b_data.len(), out_grad.len(), "div backward size mismatch");
-                let mut da = vec![0.0; out_grad.len()];
-                let mut db = vec![0.0; out_grad.len()];
-                for i in 0..out_grad.len() {
-                    da[i] = out_grad[i] / b_data[i];
-                    db[i] = -out_grad[i] * a_data[i] / (b_data[i] * b_data[i]);
-                }
+                let a_strides = contiguous_strides(&a_shape);
+                let b_strides = contiguous_strides(&b_shape);
+                let a_bstrides = broadcast_strides_for(&a_shape, &a_strides, &out_shape);
+                let b_bstrides = broadcast_strides_for(&b_shape, &b_strides, &out_shape);
+                let mut da = vec![0.0; numel(&a_shape)];
+                let mut db = vec![0.0; numel(&b_shape)];
+
+                let mut out_i = 0usize;
+                for_each_index(&out_shape, |coords| {
+                    let ai = offset_from_coords(coords, &a_bstrides);
+                    let bi = offset_from_coords(coords, &b_bstrides);
+                    let g = out_grad[out_i];
+                    let denom = b_data[bi];
+                    da[ai] += g / denom;
+                    db[bi] += -g * a_data[ai] / (denom * denom);
+                    out_i += 1;
+                });
+
                 self.add_grad(a, &da);
                 self.add_grad(b, &db);
             }
@@ -669,95 +799,79 @@ impl Engine {
                 }
                 self.add_grad(a, &da);
             }
-            (Some(Op::SumRowsKeepDim), Parents::Unary(a)) => {
+            (Some(Op::Sum { axis, keepdim }), Parents::Unary(a)) => {
                 let a_shape = self.shape_of(a);
-                let (rows, cols) = shape2(&a_shape);
+                let expected_out_shape = reduced_shape(&a_shape, axis, keepdim);
                 assert_eq!(
-                    out_grad.len(),
-                    rows,
-                    "sum_rows_keepdim backward grad size mismatch: expected {}, got {}",
-                    rows,
-                    out_grad.len()
+                    out_shape, expected_out_shape,
+                    "sum backward output shape mismatch: expected {:?}, got {:?}",
+                    expected_out_shape, out_shape
                 );
-                let mut da = vec![0.0; rows * cols];
-                for i in 0..rows {
-                    for j in 0..cols {
-                        da[idx2(i, j, cols)] = out_grad[i];
-                    }
-                }
+                let out_strides = contiguous_strides(&out_shape);
+                let mut da = vec![0.0; numel(&a_shape)];
+                let mut a_i = 0usize;
+
+                for_each_index(&a_shape, |coords| {
+                    let out_i = reduced_offset_from_input_coords(
+                        coords,
+                        &out_shape,
+                        &out_strides,
+                        axis,
+                        keepdim,
+                    );
+                    da[a_i] = out_grad[out_i];
+                    a_i += 1;
+                });
+
                 self.add_grad(a, &da);
             }
-            (Some(Op::SubRowwise), Parents::Binary(a, b)) => {
+            (Some(Op::Max { axis, keepdim }), Parents::Unary(a)) => {
                 let a_shape = self.shape_of(a);
-                let b_shape = self.shape_of(b);
-                let (rows, cols) = shape2(&a_shape);
+                let expected_out_shape = reduced_shape(&a_shape, axis, keepdim);
                 assert_eq!(
-                    b_shape,
-                    vec![rows, 1],
-                    "sub_rowwise backward shape mismatch: left={:?}, right={:?}",
-                    a_shape,
-                    b_shape
+                    out_shape, expected_out_shape,
+                    "max backward output shape mismatch: expected {:?}, got {:?}",
+                    expected_out_shape, out_shape
                 );
-                let da = out_grad.clone();
-                let mut db = vec![0.0; rows];
-                for i in 0..rows {
-                    let mut acc = 0.0;
-                    for j in 0..cols {
-                        acc += out_grad[idx2(i, j, cols)];
-                    }
-                    db[i] = -acc;
-                }
-                self.add_grad(a, &da);
-                self.add_grad(b, &db);
-            }
-            (Some(Op::DivRowwise), Parents::Binary(a, b)) => {
-                let a_shape = self.shape_of(a);
-                let b_shape = self.shape_of(b);
-                let (rows, cols) = shape2(&a_shape);
-                assert_eq!(
-                    b_shape,
-                    vec![rows, 1],
-                    "div_rowwise backward shape mismatch: left={:?}, right={:?}",
-                    a_shape,
-                    b_shape
-                );
+
+                let out_strides = contiguous_strides(&out_shape);
                 let a_data = self.data_of(a);
-                let b_data = self.data_of(b);
-                let mut da = vec![0.0; rows * cols];
-                let mut db = vec![0.0; rows];
-                for i in 0..rows {
-                    let denom = b_data[i];
-                    let denom_sq = denom * denom;
-                    for j in 0..cols {
-                        let idx = idx2(i, j, cols);
-                        da[idx] = out_grad[idx] / denom;
-                        db[i] += -out_grad[idx] * a_data[idx] / denom_sq;
+                let mut counts = vec![0usize; out_grad.len()];
+                let mut a_i = 0usize;
+
+                for_each_index(&a_shape, |coords| {
+                    let out_i = reduced_offset_from_input_coords(
+                        coords,
+                        &out_shape,
+                        &out_strides,
+                        axis,
+                        keepdim,
+                    );
+                    if a_data[a_i] == out_data[out_i] {
+                        counts[out_i] += 1;
                     }
-                }
+                    a_i += 1;
+                });
+
+                let mut da = vec![0.0; numel(&a_shape)];
+                let mut a_i = 0usize;
+                for_each_index(&a_shape, |coords| {
+                    let out_i = reduced_offset_from_input_coords(
+                        coords,
+                        &out_shape,
+                        &out_strides,
+                        axis,
+                        keepdim,
+                    );
+                    if a_data[a_i] == out_data[out_i] {
+                        let count = counts[out_i];
+                        assert!(count > 0, "max backward encountered zero tie count");
+                        da[a_i] += out_grad[out_i] / count as f32;
+                    }
+                    a_i += 1;
+                });
+
                 self.add_grad(a, &da);
-                self.add_grad(b, &db);
-            }
-            (Some(Op::AddRowBias), Parents::Binary(x, b)) => {
-                let x_shape = self.shape_of(x);
-                let b_shape = self.shape_of(b);
-                let (rows, cols) = shape2(&x_shape);
-                assert_eq!(
-                    b_shape,
-                    vec![cols],
-                    "bias backward shape mismatch: expected [{cols}], got {:?}",
-                    b_shape
-                );
-
-                let dx = out_grad.clone();
-                let mut db = vec![0.0; cols];
-                for i in 0..rows {
-                    for j in 0..cols {
-                        db[j] += out_grad[idx2(i, j, cols)];
-                    }
-                }
-
-                self.add_grad(x, &dx);
-                self.add_grad(b, &db);
             }
             (Some(Op::Relu), Parents::Unary(a)) => {
                 let a_data = self.data_of(a);

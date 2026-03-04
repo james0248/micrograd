@@ -23,7 +23,7 @@ fn matmul_and_add_bias_forward() {
     let x = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
     let w = Tensor::from_vec(vec![5.0, 6.0, 7.0, 8.0], vec![2, 2]);
     let b = Tensor::from_vec(vec![1.0, -1.0], vec![2]);
-    let y = x.matmul(&w).add_row_bias(&b);
+    let y = x.matmul(&w).add(&b);
     assert_eq!(y.shape(), vec![2, 2]);
     assert_eq!(y.data(), vec![20.0, 21.0, 44.0, 49.0]);
 }
@@ -139,4 +139,113 @@ fn tensor_stats_track_context_depth() {
             assert_eq!(s2.context_depth, 2);
         });
     });
+}
+
+#[test]
+fn broadcast_add_forward_matches_expected() {
+    reset_state();
+    let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
+    let b = Tensor::from_vec(vec![10.0, 20.0, 30.0], vec![3]);
+    let out = a.add(&b);
+    assert_eq!(out.shape(), vec![2, 3]);
+    assert_eq!(out.data(), vec![11.0, 22.0, 33.0, 14.0, 25.0, 36.0]);
+}
+
+#[test]
+fn broadcast_mul_backward_reduces_to_input_shapes() {
+    reset_state();
+    let a = Tensor::parameter(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
+    let b = Tensor::parameter(vec![10.0, 20.0, 30.0], vec![3]);
+    let loss = a.mul(&b).mean();
+    loss.backward();
+
+    let ga = a.grad();
+    let gb = b.grad();
+    let expected_a = [
+        10.0 / 6.0,
+        20.0 / 6.0,
+        30.0 / 6.0,
+        10.0 / 6.0,
+        20.0 / 6.0,
+        30.0 / 6.0,
+    ];
+    let expected_b = [5.0 / 6.0, 7.0 / 6.0, 9.0 / 6.0];
+
+    for (actual, expected) in ga.iter().zip(expected_a.iter()) {
+        assert_close(*actual, *expected, 1e-6);
+    }
+    for (actual, expected) in gb.iter().zip(expected_b.iter()) {
+        assert_close(*actual, *expected, 1e-6);
+    }
+}
+
+#[test]
+fn sum_axis_shapes_and_values_are_correct() {
+    reset_state();
+    let x = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
+
+    let s_row_keep = x.sum(1, true);
+    assert_eq!(s_row_keep.shape(), vec![2, 1]);
+    assert_eq!(s_row_keep.data(), vec![6.0, 15.0]);
+
+    let s_row = x.sum(1, false);
+    assert_eq!(s_row.shape(), vec![2]);
+    assert_eq!(s_row.data(), vec![6.0, 15.0]);
+
+    let s_col = x.sum(0, false);
+    assert_eq!(s_col.shape(), vec![3]);
+    assert_eq!(s_col.data(), vec![5.0, 7.0, 9.0]);
+}
+
+#[test]
+fn max_backward_splits_tie_gradients_evenly() {
+    reset_state();
+    let x = Tensor::parameter(vec![2.0, 2.0, 1.0], vec![1, 3]);
+    let y = x.max(1, false);
+    y.backward();
+    let g = x.grad();
+    assert_eq!(g.len(), 3);
+    assert_close(g[0], 0.5, 1e-6);
+    assert_close(g[1], 0.5, 1e-6);
+    assert_close(g[2], 0.0, 1e-6);
+}
+
+#[test]
+fn batched_matmul_forward_supports_batch_broadcast() {
+    reset_state();
+    let a = Tensor::from_vec(
+        vec![
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, //
+            7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+        ],
+        vec![2, 2, 3],
+    );
+    let b = Tensor::from_vec(vec![1.0, 0.0, 0.0, 1.0, 1.0, 1.0], vec![1, 3, 2]);
+    let out = a.matmul(&b);
+    assert_eq!(out.shape(), vec![2, 2, 2]);
+    assert_eq!(
+        out.data(),
+        vec![4.0, 5.0, 10.0, 11.0, 16.0, 17.0, 22.0, 23.0]
+    );
+}
+
+#[test]
+fn batched_matmul_backward_accumulates_broadcasted_batch_grad() {
+    reset_state();
+    let a = Tensor::parameter(vec![1.0, 2.0, 3.0, 4.0], vec![2, 1, 2]);
+    let b = Tensor::parameter(vec![5.0, 6.0], vec![2, 1]);
+    let loss = a.matmul(&b).mean();
+    loss.backward();
+
+    let ga = a.grad();
+    let gb = b.grad();
+    let expected_a = [2.5, 3.0, 2.5, 3.0];
+    let expected_b = [2.0, 3.0];
+
+    for (actual, expected) in ga.iter().zip(expected_a.iter()) {
+        assert_close(*actual, *expected, 1e-6);
+    }
+    for (actual, expected) in gb.iter().zip(expected_b.iter()) {
+        assert_close(*actual, *expected, 1e-6);
+    }
 }

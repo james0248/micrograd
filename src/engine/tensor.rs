@@ -1,6 +1,10 @@
 use super::Op;
 use super::engine::{Handle, Parents};
 use super::kernels::matmul_forward;
+use super::shape::{
+    broadcast_shape, broadcast_strides_for, contiguous_strides, for_each_index, numel,
+    offset_from_coords, reduced_offset_from_input_coords, reduced_shape,
+};
 use super::with_engine;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -8,17 +12,31 @@ pub struct Tensor {
     pub(super) handle: Handle,
 }
 
-fn numel(shape: &[usize]) -> usize {
-    shape.iter().product()
-}
+fn binary_broadcast_forward(
+    a_data: &[f32],
+    a_shape: &[usize],
+    b_data: &[f32],
+    b_shape: &[usize],
+    f: impl Fn(f32, f32) -> f32,
+) -> (Vec<f32>, Vec<usize>) {
+    let out_shape = broadcast_shape(a_shape, b_shape);
+    let out_len = numel(&out_shape);
+    let mut out = vec![0.0; out_len];
 
-fn shape2(shape: &[usize]) -> (usize, usize) {
-    assert_eq!(shape.len(), 2, "expected rank-2 tensor, got {:?}", shape);
-    (shape[0], shape[1])
-}
+    let a_strides = contiguous_strides(a_shape);
+    let b_strides = contiguous_strides(b_shape);
+    let a_bstrides = broadcast_strides_for(a_shape, &a_strides, &out_shape);
+    let b_bstrides = broadcast_strides_for(b_shape, &b_strides, &out_shape);
 
-fn idx2(row: usize, col: usize, cols: usize) -> usize {
-    row * cols + col
+    let mut out_i = 0usize;
+    for_each_index(&out_shape, |coords| {
+        let a_idx = offset_from_coords(coords, &a_bstrides);
+        let b_idx = offset_from_coords(coords, &b_bstrides);
+        out[out_i] = f(a_data[a_idx], b_data[b_idx]);
+        out_i += 1;
+    });
+
+    (out, out_shape)
 }
 
 impl Tensor {
@@ -93,54 +111,58 @@ impl Tensor {
         with_engine(|engine| {
             let a_shape = engine.shape_of(*self);
             let b_shape = engine.shape_of(*other);
-            let (m, k) = shape2(&a_shape);
-            let (k_b, n) = shape2(&b_shape);
+            assert!(
+                a_shape.len() >= 2 && b_shape.len() >= 2,
+                "matmul expects rank >= 2: left={:?}, right={:?}",
+                a_shape,
+                b_shape
+            );
+
+            let m = a_shape[a_shape.len() - 2];
+            let k = a_shape[a_shape.len() - 1];
+            let k_b = b_shape[b_shape.len() - 2];
+            let n = b_shape[b_shape.len() - 1];
             assert_eq!(
                 k, k_b,
                 "matmul shape mismatch: left={:?}, right={:?}",
                 a_shape, b_shape
             );
 
+            let a_batch = &a_shape[..a_shape.len() - 2];
+            let b_batch = &b_shape[..b_shape.len() - 2];
+            let batch_shape = broadcast_shape(a_batch, b_batch);
+
             let a = engine.data_of(*self);
             let b = engine.data_of(*other);
-            let out = matmul_forward(&a, &b, m, k, n);
+            let a_strides = contiguous_strides(&a_shape);
+            let b_strides = contiguous_strides(&b_shape);
+            let a_batch_strides =
+                broadcast_strides_for(a_batch, &a_strides[..a_batch.len()], &batch_shape);
+            let b_batch_strides =
+                broadcast_strides_for(b_batch, &b_strides[..b_batch.len()], &batch_shape);
+            let batch_strides = contiguous_strides(&batch_shape);
 
-            engine.create_from_op(
-                out,
-                vec![m, n],
-                Op::MatMul2D,
-                Parents::Binary(*self, *other),
-            )
-        })
-    }
+            let a_block = m * k;
+            let b_block = k * n;
+            let out_block = m * n;
+            let mut out_shape = batch_shape.clone();
+            out_shape.push(m);
+            out_shape.push(n);
+            let mut out = vec![0.0; numel(&out_shape)];
 
-    pub fn add_row_bias(&self, bias: &Tensor) -> Tensor {
-        with_engine(|engine| {
-            let x_shape = engine.shape_of(*self);
-            let b_shape = engine.shape_of(*bias);
-            let (rows, cols) = shape2(&x_shape);
-            assert_eq!(
-                b_shape,
-                vec![cols],
-                "add_row_bias expects bias shape [{cols}], got {:?}",
-                b_shape
-            );
+            for_each_index(&batch_shape, |batch_coords| {
+                let a_off = offset_from_coords(batch_coords, &a_batch_strides);
+                let b_off = offset_from_coords(batch_coords, &b_batch_strides);
+                let batch_off = offset_from_coords(batch_coords, &batch_strides);
+                let out_off = batch_off * out_block;
 
-            let x = engine.data_of(*self);
-            let b = engine.data_of(*bias);
-            let mut out = vec![0.0; rows * cols];
-            for i in 0..rows {
-                for j in 0..cols {
-                    out[idx2(i, j, cols)] = x[idx2(i, j, cols)] + b[j];
-                }
-            }
+                let a_slice = &a[a_off..a_off + a_block];
+                let b_slice = &b[b_off..b_off + b_block];
+                let block = matmul_forward(a_slice, b_slice, m, k, n);
+                out[out_off..out_off + out_block].copy_from_slice(&block);
+            });
 
-            engine.create_from_op(
-                out,
-                vec![rows, cols],
-                Op::AddRowBias,
-                Parents::Binary(*self, *bias),
-            )
+            engine.create_from_op(out, out_shape, Op::MatMul, Parents::Binary(*self, *other))
         })
     }
 
@@ -148,16 +170,11 @@ impl Tensor {
         with_engine(|engine| {
             let a_shape = engine.shape_of(*self);
             let b_shape = engine.shape_of(*other);
-            assert_eq!(
-                a_shape, b_shape,
-                "add shape mismatch: left={:?}, right={:?}",
-                a_shape, b_shape
-            );
-
             let a = engine.data_of(*self);
             let b = engine.data_of(*other);
-            let out: Vec<f32> = a.into_iter().zip(b).map(|(x, y)| x + y).collect();
-            engine.create_from_op(out, a_shape, Op::Add, Parents::Binary(*self, *other))
+            let (out, out_shape) =
+                binary_broadcast_forward(&a, &a_shape, &b, &b_shape, |x, y| x + y);
+            engine.create_from_op(out, out_shape, Op::Add, Parents::Binary(*self, *other))
         })
     }
 
@@ -165,16 +182,11 @@ impl Tensor {
         with_engine(|engine| {
             let a_shape = engine.shape_of(*self);
             let b_shape = engine.shape_of(*other);
-            assert_eq!(
-                a_shape, b_shape,
-                "sub shape mismatch: left={:?}, right={:?}",
-                a_shape, b_shape
-            );
-
             let a = engine.data_of(*self);
             let b = engine.data_of(*other);
-            let out: Vec<f32> = a.into_iter().zip(b).map(|(x, y)| x - y).collect();
-            engine.create_from_op(out, a_shape, Op::Sub, Parents::Binary(*self, *other))
+            let (out, out_shape) =
+                binary_broadcast_forward(&a, &a_shape, &b, &b_shape, |x, y| x - y);
+            engine.create_from_op(out, out_shape, Op::Sub, Parents::Binary(*self, *other))
         })
     }
 
@@ -182,16 +194,11 @@ impl Tensor {
         with_engine(|engine| {
             let a_shape = engine.shape_of(*self);
             let b_shape = engine.shape_of(*other);
-            assert_eq!(
-                a_shape, b_shape,
-                "mul shape mismatch: left={:?}, right={:?}",
-                a_shape, b_shape
-            );
-
             let a = engine.data_of(*self);
             let b = engine.data_of(*other);
-            let out: Vec<f32> = a.into_iter().zip(b).map(|(x, y)| x * y).collect();
-            engine.create_from_op(out, a_shape, Op::Mul, Parents::Binary(*self, *other))
+            let (out, out_shape) =
+                binary_broadcast_forward(&a, &a_shape, &b, &b_shape, |x, y| x * y);
+            engine.create_from_op(out, out_shape, Op::Mul, Parents::Binary(*self, *other))
         })
     }
 
@@ -199,16 +206,11 @@ impl Tensor {
         with_engine(|engine| {
             let a_shape = engine.shape_of(*self);
             let b_shape = engine.shape_of(*other);
-            assert_eq!(
-                a_shape, b_shape,
-                "div shape mismatch: left={:?}, right={:?}",
-                a_shape, b_shape
-            );
-
             let a = engine.data_of(*self);
             let b = engine.data_of(*other);
-            let out: Vec<f32> = a.into_iter().zip(b).map(|(x, y)| x / y).collect();
-            engine.create_from_op(out, a_shape, Op::Div, Parents::Binary(*self, *other))
+            let (out, out_shape) =
+                binary_broadcast_forward(&a, &a_shape, &b, &b_shape, |x, y| x / y);
+            engine.create_from_op(out, out_shape, Op::Div, Parents::Binary(*self, *other))
         })
     }
 
@@ -230,82 +232,63 @@ impl Tensor {
         })
     }
 
-    pub fn sum_rows_keepdim(&self) -> Tensor {
+    pub fn sum(&self, axis: usize, keepdim: bool) -> Tensor {
         with_engine(|engine| {
             let shape = engine.shape_of(*self);
-            let (rows, cols) = shape2(&shape);
+            let out_shape = reduced_shape(&shape, axis, keepdim);
             let a = engine.data_of(*self);
-            let mut out = vec![0.0; rows];
-            for i in 0..rows {
-                let mut acc = 0.0;
-                for j in 0..cols {
-                    acc += a[idx2(i, j, cols)];
-                }
-                out[i] = acc;
-            }
+            let out_strides = contiguous_strides(&out_shape);
+            let mut out = vec![0.0; numel(&out_shape)];
+            let mut in_i = 0usize;
+
+            for_each_index(&shape, |coords| {
+                let out_i = reduced_offset_from_input_coords(
+                    coords,
+                    &out_shape,
+                    &out_strides,
+                    axis,
+                    keepdim,
+                );
+                out[out_i] += a[in_i];
+                in_i += 1;
+            });
+
             engine.create_from_op(
                 out,
-                vec![rows, 1],
-                Op::SumRowsKeepDim,
+                out_shape,
+                Op::Sum { axis, keepdim },
                 Parents::Unary(*self),
             )
         })
     }
 
-    pub fn sub_rowwise(&self, row_vec: &Tensor) -> Tensor {
+    pub fn max(&self, axis: usize, keepdim: bool) -> Tensor {
         with_engine(|engine| {
-            let a_shape = engine.shape_of(*self);
-            let b_shape = engine.shape_of(*row_vec);
-            let (rows, cols) = shape2(&a_shape);
-            assert_eq!(
-                b_shape,
-                vec![rows, 1],
-                "sub_rowwise expects right shape [{rows}, 1], got {:?}",
-                b_shape
-            );
+            let shape = engine.shape_of(*self);
+            let out_shape = reduced_shape(&shape, axis, keepdim);
+            let out_strides = contiguous_strides(&out_shape);
+            let x = engine.data_of(*self);
 
-            let a = engine.data_of(*self);
-            let b = engine.data_of(*row_vec);
-            let mut out = vec![0.0; rows * cols];
-            for i in 0..rows {
-                for j in 0..cols {
-                    out[idx2(i, j, cols)] = a[idx2(i, j, cols)] - b[i];
-                }
-            }
+            let mut out = vec![f32::NEG_INFINITY; numel(&out_shape)];
+            let mut in_i = 0usize;
+
+            for_each_index(&shape, |coords| {
+                let out_i = reduced_offset_from_input_coords(
+                    coords,
+                    &out_shape,
+                    &out_strides,
+                    axis,
+                    keepdim,
+                );
+                out[out_i] = out[out_i].max(x[in_i]);
+                in_i += 1;
+            });
+
             engine.create_from_op(
                 out,
-                vec![rows, cols],
-                Op::SubRowwise,
-                Parents::Binary(*self, *row_vec),
-            )
-        })
-    }
-
-    pub fn div_rowwise(&self, row_vec: &Tensor) -> Tensor {
-        with_engine(|engine| {
-            let a_shape = engine.shape_of(*self);
-            let b_shape = engine.shape_of(*row_vec);
-            let (rows, cols) = shape2(&a_shape);
-            assert_eq!(
-                b_shape,
-                vec![rows, 1],
-                "div_rowwise expects right shape [{rows}, 1], got {:?}",
-                b_shape
-            );
-
-            let a = engine.data_of(*self);
-            let b = engine.data_of(*row_vec);
-            let mut out = vec![0.0; rows * cols];
-            for i in 0..rows {
-                for j in 0..cols {
-                    out[idx2(i, j, cols)] = a[idx2(i, j, cols)] / b[i];
-                }
-            }
-            engine.create_from_op(
-                out,
-                vec![rows, cols],
-                Op::DivRowwise,
-                Parents::Binary(*self, *row_vec),
+                out_shape,
+                Op::Max { axis, keepdim },
+                Parents::Unary(*self),
             )
         })
     }

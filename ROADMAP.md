@@ -2,9 +2,9 @@
 
 ## Stage Tracking
 
-- Current Stage: `Complete (Post Stage 12D)`
+- Current Stage: `Complete (Post Stage 13)`
 - Last Updated: `2026-03-04`
-- Next Gate: `None`
+- Next Gate: `Stage 14 (performance tuning for ND broadcast kernels)`
 - Stage 3 Status: `Accepted (forward ops + tests complete on 2026-03-03)`
 - Stage 4 Status: `Accepted (backward engine + tests complete on 2026-03-03)`
 - Stage 5 Status: `Accepted (operator ergonomics + parity tests complete on 2026-03-03)`
@@ -33,6 +33,7 @@
 - Stage 12B Status: `Accepted (scoped-thread parallel matmul integrated for forward and backward paths on 2026-03-04)`
 - Stage 12C Status: `Accepted (epoch timing instrumentation added to tensor MNIST demo on 2026-03-04)`
 - Stage 12D Status: `Accepted (verification complete; multicore speed validation delegated to user machine on 2026-03-04)`
+- Stage 13 Status: `Accepted (N-D broadcasting, generic reductions, and batched matmul autograd complete on 2026-03-04)`
 
 ## Thematic Priorities
 
@@ -419,6 +420,22 @@ Scope:
 Acceptance:
 
 - `cargo test` passes post-threading refactor.
+
+### Stage 13 - N-D Broadcast Tensor Core
+
+Scope:
+
+- Extend tensor elementwise ops (`add/sub/mul/div`) to NumPy/PyTorch-style broadcasting across arbitrary ranks.
+- Add generic reduction ops `sum(axis, keepdim)` and `max(axis, keepdim)` with autograd support.
+- Replace rowwise-specialized ops (`add_row_bias`, `sub_rowwise`, `div_rowwise`, `sum_rows_keepdim`) with generic broadcast/reduction usage.
+- Extend matmul to rank `>= 2` with broadcasted leading batch dimensions in both forward and backward.
+- Update CE and NN paths to depend only on generic tensor primitives.
+
+Acceptance:
+
+- Full `cargo test` suite passes with new broadcast/reduction/matmul coverage.
+- Batched matmul gradients accumulate correctly when one side uses broadcasted batch dimensions.
+- CE stabilization and training path run through `max/sum` and broadcasted binary ops only.
 
 ## Performance Plan
 

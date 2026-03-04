@@ -1,5 +1,6 @@
 mod engine;
 mod kernels;
+mod shape;
 mod tensor;
 
 pub use tensor::Tensor;
@@ -10,17 +11,15 @@ use engine::{ContextKind, Engine};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
-    MatMul2D,
-    AddRowBias,
+    MatMul,
     Add,
     Sub,
     Mul,
     Div,
     Exp,
     Log,
-    SumRowsKeepDim,
-    SubRowwise,
-    DivRowwise,
+    Sum { axis: usize, keepdim: bool },
+    Max { axis: usize, keepdim: bool },
     Relu,
     Mean,
 }

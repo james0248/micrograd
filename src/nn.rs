@@ -34,7 +34,7 @@ impl Linear {
     }
 
     pub fn forward(&self, x: &Tensor) -> Tensor {
-        x.matmul(&self.weight).add_row_bias(&self.bias)
+        x.matmul(&self.weight).add(&self.bias)
     }
 
     pub fn parameters(&self) -> Vec<Tensor> {
