@@ -1,7 +1,10 @@
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::data::{MnistSample, load_and_split_mnist};
 use crate::engine::{Tensor, no_grad, with_grad};
@@ -16,6 +19,8 @@ const SHUFFLE_SEED: u64 = 19;
 const MODEL_SEED: u64 = 42;
 const BATCH_SIZE: usize = 64;
 const EPOCHS: usize = 10;
+const CHECKPOINT_DIR: &str = "artifacts";
+const CHECKPOINT_PREFIX: &str = "mnist";
 
 #[derive(Debug, Clone)]
 struct FlatMnist {
@@ -107,6 +112,28 @@ fn learning_rate_for_epoch(epoch: usize) -> f32 {
     if epoch < 6 { 0.1 } else { 0.01 }
 }
 
+fn checkpoint_path_in_dir(base_dir: &Path, prefix: &str) -> Result<PathBuf, String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| format!("failed to get current timestamp: {err}"))?;
+    let filename = format!("{prefix}_{}_{}.ckpt", now.as_secs(), now.subsec_nanos());
+    Ok(base_dir.join(filename))
+}
+
+fn save_model_checkpoint(model: &Mlp, base_dir: &Path, prefix: &str) -> Result<PathBuf, String> {
+    fs::create_dir_all(base_dir).map_err(|err| {
+        format!(
+            "failed to create checkpoint directory {}: {err}",
+            base_dir.display()
+        )
+    })?;
+    let path = checkpoint_path_in_dir(base_dir, prefix)?;
+    model
+        .save_weights(&path)
+        .map_err(|err| format!("failed to save checkpoint {}: {err}", path.display()))?;
+    Ok(path)
+}
+
 pub fn run() -> Result<(), String> {
     let (train_samples, eval_samples) = load_and_split_mnist(DATA_PATH, EVAL_RATIO, SPLIT_SEED)?;
     let train = flatten_samples(train_samples);
@@ -184,5 +211,78 @@ pub fn run() -> Result<(), String> {
         );
     }
 
+    let checkpoint_path =
+        save_model_checkpoint(&model, Path::new(CHECKPOINT_DIR), CHECKPOINT_PREFIX)?;
+    println!("saved checkpoint: {}", checkpoint_path.display());
+
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::reset_state;
+
+    fn temp_path(tag: &str) -> PathBuf {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic here");
+        std::env::temp_dir().join(format!(
+            "micrograd_mnist_{tag}_{}_{}",
+            std::process::id(),
+            now.as_nanos()
+        ))
+    }
+
+    #[test]
+    fn checkpoint_filename_has_expected_shape() {
+        let path = checkpoint_path_in_dir(Path::new(CHECKPOINT_DIR), CHECKPOINT_PREFIX)
+            .expect("path generation must succeed");
+        let file_name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .expect("filename must be valid utf-8");
+
+        assert!(file_name.starts_with("mnist_"), "{file_name}");
+        assert!(file_name.ends_with(".ckpt"), "{file_name}");
+        let stem = file_name.strip_suffix(".ckpt").expect("must end with ckpt");
+        let parts: Vec<&str> = stem.split('_').collect();
+        assert_eq!(parts.len(), 3, "{file_name}");
+        assert_eq!(parts[0], "mnist");
+        assert!(parts[1].parse::<u64>().is_ok(), "{file_name}");
+        assert!(parts[2].parse::<u32>().is_ok(), "{file_name}");
+    }
+
+    #[test]
+    fn save_model_checkpoint_creates_file() {
+        reset_state();
+        let dir = temp_path("save_ok");
+        let model = Mlp::new(&[2, 4, 2], 7);
+
+        let path = save_model_checkpoint(&model, &dir, "mnist_test").expect("save must succeed");
+        let metadata = fs::metadata(&path).expect("checkpoint file must exist");
+        assert!(metadata.is_file());
+        assert!(metadata.len() > 0, "checkpoint file must be non-empty");
+
+        fs::remove_file(path).ok();
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn save_model_checkpoint_returns_err_for_file_as_directory() {
+        reset_state();
+        let base = temp_path("save_err");
+        let file_path = base.with_extension("tmp");
+        std::fs::File::create(&file_path).expect("create file must succeed");
+        let model = Mlp::new(&[2, 4, 2], 7);
+
+        let err = save_model_checkpoint(&model, &file_path, "mnist_test")
+            .expect_err("save must fail when directory path is a file");
+        assert!(
+            err.contains("failed to create checkpoint directory"),
+            "{err}"
+        );
+
+        fs::remove_file(file_path).ok();
+    }
 }
