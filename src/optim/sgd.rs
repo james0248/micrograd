@@ -32,13 +32,7 @@ impl Optimizer for Sgd {
 
     fn step(&mut self) {
         for p in &self.params {
-            let mut data = p.data();
-            let grad = p.grad();
-            assert_eq!(data.len(), grad.len(), "parameter/grad size mismatch");
-            for i in 0..data.len() {
-                data[i] -= self.lr * grad[i];
-            }
-            p.set_data(&data);
+            p.sgd_step(self.lr);
         }
     }
 }

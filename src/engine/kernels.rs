@@ -11,15 +11,15 @@ fn worker_count(rows: usize) -> usize {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct StridedMatrix {
-    rows: usize,
-    cols: usize,
-    row_stride: usize,
-    col_stride: usize,
-    offset: usize,
+pub(super) struct MatRef {
+    pub(super) rows: usize,
+    pub(super) cols: usize,
+    pub(super) row_stride: usize,
+    pub(super) col_stride: usize,
+    pub(super) offset: usize,
 }
 
-fn validate_bounds(data_len: usize, m: StridedMatrix, side: &str) {
+fn validate_bounds(data_len: usize, m: MatRef, side: &str) {
     if m.rows == 0 || m.cols == 0 {
         assert!(
             m.offset <= data_len,
@@ -49,7 +49,7 @@ fn validate_bounds(data_len: usize, m: StridedMatrix, side: &str) {
     );
 }
 
-fn matmul_strided(a: &[f32], a_mat: StridedMatrix, b: &[f32], b_mat: StridedMatrix) -> Vec<f32> {
+pub(super) fn matmul(a: &[f32], a_mat: MatRef, b: &[f32], b_mat: MatRef) -> Vec<f32> {
     assert_eq!(
         a_mat.cols,
         b_mat.rows,
@@ -69,6 +69,28 @@ fn matmul_strided(a: &[f32], a_mat: StridedMatrix, b: &[f32], b_mat: StridedMatr
     }
 
     let workers = worker_count(rows);
+    let ops = rows
+        .checked_mul(cols)
+        .and_then(|v| v.checked_mul(k))
+        .unwrap_or(usize::MAX);
+    if workers == 1 || ops < 256_000 {
+        for i in 0..rows {
+            let out_row = &mut out[i * cols..(i + 1) * cols];
+            let a_base = a_mat.offset + i * a_mat.row_stride;
+            for j in 0..cols {
+                let b_base = b_mat.offset + j * b_mat.col_stride;
+                let mut acc = 0.0f32;
+                for kk in 0..k {
+                    let a_idx = a_base + kk * a_mat.col_stride;
+                    let b_idx = b_base + kk * b_mat.row_stride;
+                    acc += a[a_idx] * b[b_idx];
+                }
+                out_row[j] = acc;
+            }
+        }
+        return out;
+    }
+
     let rows_per_chunk = rows.div_ceil(workers);
 
     thread::scope(|scope| {
@@ -100,79 +122,19 @@ fn matmul_strided(a: &[f32], a_mat: StridedMatrix, b: &[f32], b_mat: StridedMatr
     out
 }
 
-pub(super) fn matmul_forward(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
-    let a_mat = StridedMatrix {
-        rows: m,
-        cols: k,
-        row_stride: k,
-        col_stride: 1,
-        offset: 0,
-    };
-    let b_mat = StridedMatrix {
-        rows: k,
-        cols: n,
-        row_stride: n,
-        col_stride: 1,
-        offset: 0,
-    };
-    matmul_strided(a, a_mat, b, b_mat)
-}
-
-pub(super) fn matmul_backward_da(
-    out_grad: &[f32],
-    b: &[f32],
-    m: usize,
-    n: usize,
-    k: usize,
-) -> Vec<f32> {
-    let d_out = StridedMatrix {
-        rows: m,
-        cols: n,
-        row_stride: n,
-        col_stride: 1,
-        offset: 0,
-    };
-    // Logical right matrix is B^T with shape [n, k], mapped into B[k, n].
-    let right = StridedMatrix {
-        rows: n,
-        cols: k,
-        row_stride: 1,
-        col_stride: n,
-        offset: 0,
-    };
-    // dA = dOut * B^T
-    matmul_strided(out_grad, d_out, b, right)
-}
-
-pub(super) fn matmul_backward_db(
-    a: &[f32],
-    out_grad: &[f32],
-    m: usize,
-    k: usize,
-    n: usize,
-) -> Vec<f32> {
-    // Logical left matrix is A^T with shape [k, m], mapped into A[m, k].
-    let left = StridedMatrix {
-        rows: k,
-        cols: m,
-        row_stride: 1,
-        col_stride: k,
-        offset: 0,
-    };
-    let d_out = StridedMatrix {
-        rows: m,
-        cols: n,
-        row_stride: n,
-        col_stride: 1,
-        offset: 0,
-    };
-    // dB = A^T * dOut
-    matmul_strided(a, left, out_grad, d_out)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{matmul_backward_da, matmul_backward_db, matmul_forward};
+    use super::{MatRef, matmul};
+
+    fn contiguous(rows: usize, cols: usize) -> MatRef {
+        MatRef {
+            rows,
+            cols,
+            row_stride: cols,
+            col_stride: 1,
+            offset: 0,
+        }
+    }
 
     fn close_vec(lhs: &[f32], rhs: &[f32], eps: f32) {
         assert_eq!(lhs.len(), rhs.len(), "length mismatch");
@@ -188,7 +150,7 @@ mod tests {
     fn matmul_forward_matches_known_result() {
         let a = vec![1.0, 2.0, 3.0, 4.0];
         let b = vec![5.0, 6.0, 7.0, 8.0];
-        let out = matmul_forward(&a, &b, 2, 2, 2);
+        let out = matmul(&a, contiguous(2, 2), &b, contiguous(2, 2));
         close_vec(&out, &[19.0, 22.0, 43.0, 50.0], 1e-6);
     }
 
@@ -200,11 +162,33 @@ mod tests {
         let d_out = vec![1.0, 2.0, 3.0, 4.0];
 
         // dA = dOut * B^T
-        let d_a = matmul_backward_da(&d_out, &b, 2, 2, 2);
+        let d_a = matmul(
+            &d_out,
+            contiguous(2, 2),
+            &b,
+            MatRef {
+                rows: 2,
+                cols: 2,
+                row_stride: 1,
+                col_stride: 2,
+                offset: 0,
+            },
+        );
         close_vec(&d_a, &[17.0, 23.0, 39.0, 53.0], 1e-6);
 
         // dB = A^T * dOut
-        let d_b = matmul_backward_db(&a, &d_out, 2, 2, 2);
+        let d_b = matmul(
+            &a,
+            MatRef {
+                rows: 2,
+                cols: 2,
+                row_stride: 1,
+                col_stride: 2,
+                offset: 0,
+            },
+            &d_out,
+            contiguous(2, 2),
+        );
         close_vec(&d_b, &[10.0, 14.0, 14.0, 20.0], 1e-6);
     }
 
@@ -212,7 +196,7 @@ mod tests {
     fn matmul_forward_rectangular_matches_known_result() {
         let a = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]; // [2,3]
         let b = vec![1.0, 2.0, 0.0, 1.0, 2.0, 3.0]; // [3,2]
-        let out = matmul_forward(&a, &b, 2, 3, 2);
+        let out = matmul(&a, contiguous(2, 3), &b, contiguous(3, 2));
         close_vec(&out, &[7.0, 13.0, 16.0, 31.0], 1e-6);
     }
 }

@@ -39,6 +39,45 @@ fn matmul_rectangular_forward_is_correct() {
 }
 
 #[test]
+fn transpose_view_is_metadata_only_and_set_data_writes_through() {
+    reset_state();
+    let x = Tensor::parameter(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
+    let t = x.transpose(0, 1);
+
+    assert_eq!(t.shape(), vec![3, 2]);
+    assert_eq!(t.data(), vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+
+    t.set_data(&[10.0, 20.0, 30.0, 40.0, 50.0, 60.0]);
+    assert_eq!(t.data(), vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0]);
+    assert_eq!(x.data(), vec![10.0, 30.0, 50.0, 20.0, 40.0, 60.0]);
+}
+
+#[test]
+fn transpose_backward_maps_gradients_to_source_layout() {
+    reset_state();
+    let x = Tensor::parameter(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+    let w = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+    let loss = x.transpose(0, 1).mul(&w).mean();
+    loss.backward();
+    let g = x.grad();
+    assert_eq!(g.len(), 4);
+    assert_close(g[0], 0.25, 1e-6);
+    assert_close(g[1], 0.75, 1e-6);
+    assert_close(g[2], 0.50, 1e-6);
+    assert_close(g[3], 1.00, 1e-6);
+}
+
+#[test]
+fn matmul_accepts_transposed_view_input() {
+    reset_state();
+    let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
+    let b = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+    let out = a.transpose(0, 1).matmul(&b);
+    assert_eq!(out.shape(), vec![3, 2]);
+    assert_eq!(out.data(), vec![13.0, 18.0, 17.0, 24.0, 21.0, 30.0]);
+}
+
+#[test]
 fn matmul_backward_mean_matches_expected_gradients() {
     reset_state();
     let a = Tensor::parameter(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);

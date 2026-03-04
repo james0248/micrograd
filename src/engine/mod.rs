@@ -20,6 +20,7 @@ pub enum Op {
     Log,
     Sum { axis: usize, keepdim: bool },
     Max { axis: usize, keepdim: bool },
+    Transpose { dim0: usize, dim1: usize },
     Relu,
     Mean,
 }
