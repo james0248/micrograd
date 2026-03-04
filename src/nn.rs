@@ -1,6 +1,7 @@
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
+use crate::checkpoint::{MLP_CHECKPOINT_VERSION, load_mlp_checkpoint, save_mlp_checkpoint};
 use crate::engine::Tensor;
 
 #[derive(Debug, Clone)]
@@ -76,5 +77,85 @@ impl Mlp {
             out.extend(layer.parameters());
         }
         out
+    }
+
+    pub fn dims(&self) -> Vec<usize> {
+        if self.layers.is_empty() {
+            return Vec::new();
+        }
+
+        let mut dims = Vec::with_capacity(self.layers.len() + 1);
+        for (idx, layer) in self.layers.iter().enumerate() {
+            let shape = layer.weight.shape();
+            assert_eq!(
+                shape.len(),
+                2,
+                "linear layer weight must be rank-2, got shape={shape:?}"
+            );
+            if idx == 0 {
+                dims.push(shape[0]);
+            } else {
+                let expected_nin = *dims.last().expect("dims must contain previous output size");
+                assert_eq!(
+                    shape[0], expected_nin,
+                    "layer input/output mismatch at layer {idx}: expected nin={expected_nin}, got nin={}",
+                    shape[0]
+                );
+            }
+            dims.push(shape[1]);
+        }
+        dims
+    }
+
+    pub fn save_weights<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), String> {
+        let dims = self.dims();
+        let params: Vec<Vec<f32>> = self.parameters().iter().map(Tensor::data).collect();
+        save_mlp_checkpoint(path, &dims, &params)
+    }
+
+    pub fn load_weights<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), String> {
+        let checkpoint = load_mlp_checkpoint(path)?;
+
+        if checkpoint.version != MLP_CHECKPOINT_VERSION {
+            return Err(format!(
+                "unsupported checkpoint version: expected {MLP_CHECKPOINT_VERSION}, got {}",
+                checkpoint.version
+            ));
+        }
+
+        let dims = self.dims();
+        if checkpoint.dims != dims {
+            return Err(format!(
+                "checkpoint dims mismatch: expected {:?}, got {:?}",
+                dims, checkpoint.dims
+            ));
+        }
+
+        let params = self.parameters();
+        if checkpoint.params.len() != params.len() {
+            return Err(format!(
+                "checkpoint parameter count mismatch: expected {}, got {}",
+                params.len(),
+                checkpoint.params.len()
+            ));
+        }
+
+        for (idx, (ckpt_param, model_param)) in
+            checkpoint.params.iter().zip(params.iter()).enumerate()
+        {
+            if ckpt_param.len() != model_param.numel() {
+                return Err(format!(
+                    "checkpoint parameter size mismatch at index {idx}: expected {}, got {}",
+                    model_param.numel(),
+                    ckpt_param.len()
+                ));
+            }
+        }
+
+        for (ckpt_param, model_param) in checkpoint.params.iter().zip(params.iter()) {
+            model_param.set_data(ckpt_param);
+        }
+
+        Ok(())
     }
 }

@@ -6,3 +6,5 @@ default-run = "micrograd"
 
 [dependencies]
 rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+bincode = "1.3"
