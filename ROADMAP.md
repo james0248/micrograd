@@ -2,8 +2,8 @@
 
 ## Stage Tracking
 
-- Current Stage: `Complete (Post Stage 9D)`
-- Last Updated: `2026-03-03`
+- Current Stage: `Complete (Post Stage 10C)`
+- Last Updated: `2026-03-04`
 - Next Gate: `None`
 - Stage 3 Status: `Accepted (forward ops + tests complete on 2026-03-03)`
 - Stage 4 Status: `Accepted (backward engine + tests complete on 2026-03-03)`
@@ -19,6 +19,9 @@
 - Stage 9B Status: `Accepted (engine_v2 context runtime refactor complete on 2026-03-03)`
 - Stage 9C Status: `Accepted (demo/test integration migrated to with_grad/no_grad on 2026-03-03)`
 - Stage 9D Status: `Accepted (verification and doc sync complete on 2026-03-03)`
+- Stage 10A Status: `Accepted (MNIST CSV loader + generic split utility complete on 2026-03-04)`
+- Stage 10B Status: `Accepted (default main migrated from XOR demo to MNIST training loop on 2026-03-04)`
+- Stage 10C Status: `Accepted (MNIST data/split tests + shape verification complete on 2026-03-04)`
 
 ## Thematic Priorities
 
@@ -31,7 +34,7 @@
 ## Done Target
 
 - `cargo test` passes for engine and training-related checks.
-- `cargo run` executes deterministic noisy XOR classification training and reports train/eval BCE + accuracy.
+- `cargo run` executes deterministic MNIST CSV classification training and reports train/eval loss + accuracy.
 - Implementation remains scalar-only.
 - Dependency rule is respected (`rand` only).
 
@@ -236,6 +239,45 @@ Scope:
 Acceptance:
 
 - `cargo test`, `cargo run`, and `cargo run --bin v2_demo` pass on the Stage 9 model.
+
+### Stage 10A - Data Pipeline (MNIST CSV)
+
+Scope:
+
+- Add MNIST CSV parsing from `data/train.csv` with label/pixel validation and pixel normalization.
+- Add generic split utility `split_train_and_eval<T>(Vec<T>, eval_ratio)` for train/eval partitioning.
+- Keep split deterministic by shuffling first with seeded RNG.
+
+Acceptance:
+
+- MNIST loader returns valid samples with normalized pixels.
+- Generic split utility is reusable and tested independently.
+
+### Stage 10B - MNIST Training Integration
+
+Scope:
+
+- Replace XOR demo in `main` with MNIST training/eval loop.
+- Use one-hidden-layer scalar MLP (`[784, hidden, 10]`) and softmax cross-entropy.
+- Report epoch-level train/eval metrics.
+
+Acceptance:
+
+- `cargo run` starts MNIST training from `data/train.csv`.
+- Logs include train/eval loss and accuracy.
+
+### Stage 10C - Verification + Docs Sync
+
+Scope:
+
+- Add integration tests for data parsing and split determinism.
+- Add MNIST-output-shape test in NN suite.
+- Sync roadmap stage tracking for Stage 10 completion.
+
+Acceptance:
+
+- `cargo test` passes with new data and utility tests.
+- Stage tracking reflects Stage 10 accepted state.
 
 ## Performance Plan
 

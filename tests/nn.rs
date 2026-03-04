@@ -82,6 +82,17 @@ fn mlp_forward_output_shape_is_one() {
 }
 
 #[test]
+fn mlp_forward_output_shape_is_ten_for_mnist_head() {
+    reset_state();
+    let mlp = Mlp::new(&[784, 16, 10], 7);
+    with_grad(|| {
+        let x: Vec<Value> = (0..784).map(|_| Value::new(0.0)).collect();
+        let out = mlp.forward(&x);
+        assert_eq!(out.len(), 10);
+    });
+}
+
+#[test]
 fn mlp_init_is_deterministic_for_same_seed() {
     reset_state();
     let a = Mlp::new(&[2, 4, 1], 1234);

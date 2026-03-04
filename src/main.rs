@@ -1,125 +1,158 @@
+use micrograd::data::{MnistSample, load_and_split_mnist};
 use micrograd::engine::{Value, no_grad, with_grad};
 use micrograd::nn::Mlp;
+use rand::SeedableRng;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::seq::SliceRandom;
 
-fn generate_xor_dataset(samples_per_corner: usize, noise: f64, seed: u64) -> Vec<([f64; 2], f64)> {
-    let mut rng = StdRng::seed_from_u64(seed);
-    let corners = [
-        ([0.0, 0.0], 0.0),
-        ([0.0, 1.0], 1.0),
-        ([1.0, 0.0], 1.0),
-        ([1.0, 1.0], 0.0),
-    ];
+const DATA_PATH: &str = "data/train.csv";
+const EVAL_RATIO: f64 = 0.10;
+const SPLIT_SEED: u64 = 7;
+const SHUFFLE_SEED: u64 = 19;
+const MODEL_SEED: u64 = 42;
+const LEARNING_RATE: f64 = 0.03;
+const EPOCHS: usize = 1;
+const HIDDEN_SIZE: usize = 16;
 
-    let mut dataset = Vec::with_capacity(samples_per_corner * corners.len());
-    for _ in 0..samples_per_corner {
-        for (xy, target) in corners {
-            let nx = rng.gen_range(-noise..noise);
-            let ny = rng.gen_range(-noise..noise);
-            dataset.push(([xy[0] + nx, xy[1] + ny], target));
-        }
+fn sample_to_values(sample: &MnistSample) -> Vec<Value> {
+    sample.pixels.iter().map(|&px| Value::new(px)).collect()
+}
+
+fn argmax_values(values: &[Value]) -> usize {
+    values
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.data().total_cmp(&b.data()))
+        .map(|(idx, _)| idx)
+        .expect("logits cannot be empty")
+}
+
+fn argmax_f64(values: &[f64]) -> usize {
+    values
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.total_cmp(b))
+        .map(|(idx, _)| idx)
+        .expect("logits cannot be empty")
+}
+
+fn softmax_cross_entropy(logits: &[Value], target: u8) -> Value {
+    assert_eq!(logits.len(), 10, "mnist head must output 10 logits");
+    let target_idx = target as usize;
+    assert!(target_idx < logits.len(), "target label out of range");
+
+    // Shift by scalar max(logits) for numerical stability.
+    let max_logit = logits
+        .iter()
+        .map(Value::data)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let shift = Value::new(max_logit);
+
+    let mut sum_exp = Value::new(0.0);
+    for logit in logits {
+        sum_exp = &sum_exp + &logit.sub(&shift).exp();
     }
 
-    dataset
+    shift.add(&sum_exp.log()).sub(&logits[target_idx])
 }
 
-fn sigmoid(logit: &Value) -> Value {
-    let one = Value::new(1.0);
-    let denom = &one + &(-logit).exp();
-    one.div(&denom)
+fn softmax_cross_entropy_scalar(logits: &[f64], target: u8) -> f64 {
+    let target_idx = target as usize;
+    let max_logit = logits.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let sum_exp: f64 = logits.iter().map(|&z| (z - max_logit).exp()).sum();
+    let logsumexp = max_logit + sum_exp.ln();
+    logsumexp - logits[target_idx]
 }
 
-fn bce_from_prob(prob: &Value, y: f64) -> Value {
-    let one = Value::new(1.0);
-    let target = Value::new(y);
-    let eps = Value::new(1e-8);
+fn evaluate(mlp: &Mlp, dataset: &[MnistSample]) -> (f64, f64) {
+    if dataset.is_empty() {
+        return (0.0, 0.0);
+    }
 
-    let p = prob.add(&eps);
-    let one_minus_p = one.sub(prob).add(&eps);
-    let term_pos = target.mul(&p.log());
-    let term_neg = one.sub(&target).mul(&one_minus_p.log());
-    -(term_pos.add(&term_neg))
-}
-
-fn bce_scalar(prob: f64, y: f64) -> f64 {
-    let eps = 1e-8;
-    let p = (prob + eps).clamp(eps, 1.0 - eps);
-    -(y * p.ln() + (1.0 - y) * (1.0 - p).ln())
-}
-
-fn evaluate(mlp: &Mlp, dataset: &[([f64; 2], f64)]) -> (f64, f64) {
     no_grad(|| {
-        let mut total_bce = 0.0;
+        let mut total_loss = 0.0;
         let mut correct = 0usize;
 
-        for (x_raw, y_raw) in dataset.iter().copied() {
-            let x = vec![Value::new(x_raw[0]), Value::new(x_raw[1])];
-            let logit = mlp.forward(&x).into_iter().next().expect("single output");
-            let prob = 1.0 / (1.0 + (-logit.data()).exp());
-            total_bce += bce_scalar(prob, y_raw);
+        for sample in dataset {
+            let input = sample_to_values(sample);
+            let logits = mlp.forward(&input);
+            let logits_data: Vec<f64> = logits.iter().map(Value::data).collect();
+            total_loss += softmax_cross_entropy_scalar(&logits_data, sample.label);
 
-            let pred_label = if prob >= 0.5 { 1.0 } else { 0.0 };
-            if (pred_label - y_raw).abs() < f64::EPSILON {
+            let pred = argmax_f64(&logits_data) as u8;
+            if pred == sample.label {
                 correct += 1;
             }
         }
 
         (
-            total_bce / dataset.len() as f64,
+            total_loss / dataset.len() as f64,
             correct as f64 / dataset.len() as f64,
         )
     })
 }
 
 fn main() {
-    let train_dataset = generate_xor_dataset(16, 0.08, 7);
-    let eval_dataset = generate_xor_dataset(16, 0.08, 77);
-    let mlp = Mlp::new(&[2, 4, 1], 42);
-    let learning_rate = 5e-2;
-    let epochs = 500;
+    let (train_dataset, eval_dataset) = load_and_split_mnist(DATA_PATH, EVAL_RATIO, SPLIT_SEED)
+        .unwrap_or_else(|e| panic!("failed to load mnist csv at {DATA_PATH}: {e}"));
 
-    for epoch in 0..epochs {
-        let (weights, biases) = mlp.parameters();
-        for p in weights.iter().chain(biases.iter()) {
-            p.zero_grad();
-        }
+    println!(
+        "loaded mnist: train={} eval={} (eval_ratio={:.2})",
+        train_dataset.len(),
+        eval_dataset.len(),
+        EVAL_RATIO
+    );
 
-        let (train_bce, train_acc) = with_grad(|| {
-            let mut total_loss = Value::new(0.0);
-            let mut correct = 0usize;
-            for (x_raw, y_raw) in train_dataset.iter().copied() {
-                let x: Vec<Value> = vec![Value::new(x_raw[0]), Value::new(x_raw[1])];
-                let logit = mlp.forward(&x).into_iter().next().expect("single output");
-                let prob = sigmoid(&logit);
-                let pred_label = if prob.data() >= 0.5 { 1.0 } else { 0.0 };
-                if (pred_label - y_raw).abs() < f64::EPSILON {
-                    correct += 1;
-                }
-                let sample_loss = bce_from_prob(&prob, y_raw);
-                total_loss = &total_loss + &sample_loss;
+    let mlp = Mlp::new(&[784, HIDDEN_SIZE, 10], MODEL_SEED);
+    let (weights, biases) = mlp.parameters();
+    let mut params = weights;
+    params.extend(biases);
+
+    let mut shuffle_rng = StdRng::seed_from_u64(SHUFFLE_SEED);
+    let mut order: Vec<usize> = (0..train_dataset.len()).collect();
+
+    for epoch in 0..EPOCHS {
+        order.shuffle(&mut shuffle_rng);
+        let mut train_loss = 0.0;
+        let mut train_correct = 0usize;
+
+        for &row_idx in &order {
+            for p in &params {
+                p.zero_grad();
             }
 
-            let mean_loss = total_loss.div(&Value::new(train_dataset.len() as f64));
-            mean_loss.backward();
+            let sample = &train_dataset[row_idx];
+            let (sample_loss, pred) = with_grad(|| {
+                let input = sample_to_values(sample);
+                let logits = mlp.forward(&input);
+                let pred = argmax_values(&logits) as u8;
+                let loss = softmax_cross_entropy(&logits, sample.label);
+                let loss_data = loss.data();
+                loss.backward();
+                (loss_data, pred)
+            });
 
-            (
-                mean_loss.data(),
-                correct as f64 / train_dataset.len() as f64,
-            )
-        });
+            for p in &params {
+                p.set_data(p.data() - LEARNING_RATE * p.grad());
+            }
 
-        for p in weights.iter().chain(biases.iter()) {
-            let next = p.data() - learning_rate * p.grad();
-            p.set_data(next);
+            train_loss += sample_loss;
+            if pred == sample.label {
+                train_correct += 1;
+            }
         }
 
-        if epoch % 25 == 0 || epoch == epochs - 1 {
-            let (eval_bce, eval_acc) = evaluate(&mlp, &eval_dataset);
-            println!(
-                "epoch {:>3}: train_bce = {:.6}, train_acc = {:.3}, eval_bce = {:.6}, eval_acc = {:.3}",
-                epoch, train_bce, train_acc, eval_bce, eval_acc
-            );
-        }
+        let train_loss = train_loss / train_dataset.len() as f64;
+        let train_acc = train_correct as f64 / train_dataset.len() as f64;
+        let (eval_loss, eval_acc) = evaluate(&mlp, &eval_dataset);
+
+        println!(
+            "epoch {:>3}: train_loss = {:.6}, train_acc = {:.4}, eval_loss = {:.6}, eval_acc = {:.4}",
+            epoch + 1,
+            train_loss,
+            train_acc,
+            eval_loss,
+            eval_acc
+        );
     }
 }
