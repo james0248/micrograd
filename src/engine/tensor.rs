@@ -26,7 +26,7 @@ impl Tensor {
         assert_eq!(
             data.len(),
             numel(&shape),
-            "tensor data length ({}) must match shape numel ({})",
+            "data length ({}) must match shape numel ({})",
             data.len(),
             numel(&shape)
         );
@@ -42,7 +42,7 @@ impl Tensor {
         assert_eq!(
             data.len(),
             numel(&shape),
-            "tensor data length ({}) must match shape numel ({})",
+            "data length ({}) must match shape numel ({})",
             data.len(),
             numel(&shape)
         );

@@ -1,155 +1,90 @@
+use rand::SeedableRng;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::seq::SliceRandom;
 
-use micrograd::engine::{Value, no_grad, reset_state, with_grad};
-use micrograd::nn::{Mlp, Neuron};
+use micrograd::engine::{Tensor, no_grad, reset_state, with_grad};
+use micrograd::losses::cross_entropy_with_logits;
+use micrograd::nn::Mlp;
+use micrograd::optim::{Optimizer, Sgd};
 
-fn xor_dataset(samples_per_corner: usize, noise: f64, seed: u64) -> Vec<([f64; 2], f64)> {
-    let mut rng = StdRng::seed_from_u64(seed);
-    let corners = [
-        ([0.0, 0.0], 0.0),
-        ([0.0, 1.0], 1.0),
-        ([1.0, 0.0], 1.0),
-        ([1.0, 1.0], 0.0),
-    ];
+fn tiny_dataset() -> Vec<([f32; 2], u8)> {
+    vec![
+        ([0.0, 0.0], 0),
+        ([0.0, 1.0], 1),
+        ([1.0, 0.0], 1),
+        ([1.0, 1.0], 1),
+    ]
+}
 
-    let mut dataset = Vec::with_capacity(samples_per_corner * corners.len());
-    for _ in 0..samples_per_corner {
-        for (xy, target) in corners {
-            let nx = rng.gen_range(-noise..noise);
-            let ny = rng.gen_range(-noise..noise);
-            dataset.push(([xy[0] + nx, xy[1] + ny], target));
-        }
+fn build_batch(rows: &[([f32; 2], u8)]) -> (Vec<f32>, Vec<u8>) {
+    let mut x = Vec::with_capacity(rows.len() * 2);
+    let mut y = Vec::with_capacity(rows.len());
+    for (xy, label) in rows {
+        x.push(xy[0]);
+        x.push(xy[1]);
+        y.push(*label);
     }
-
-    dataset
+    (x, y)
 }
 
-fn mean_loss_value(mlp: &Mlp, dataset: &[([f64; 2], f64)]) -> Value {
-    let mut total_loss = Value::new(0.0);
-
-    for (x_raw, y_raw) in dataset.iter().copied() {
-        let x = vec![Value::new(x_raw[0]), Value::new(x_raw[1])];
-        let logit = mlp.forward(&x).into_iter().next().expect("single output");
-        let prob = sigmoid(&logit);
-        total_loss = &total_loss + &bce_from_prob(&prob, y_raw);
-    }
-
-    total_loss.div(&Value::new(dataset.len() as f64))
-}
-
-fn mean_loss_scalar(mlp: &Mlp, dataset: &[([f64; 2], f64)]) -> f64 {
-    no_grad(|| mean_loss_value(mlp, dataset).data())
-}
-
-fn sigmoid(logit: &Value) -> Value {
-    let one = Value::new(1.0);
-    let denom = &one + &(-logit).exp();
-    one.div(&denom)
-}
-
-fn bce_from_prob(prob: &Value, y: f64) -> Value {
-    let one = Value::new(1.0);
-    let target = Value::new(y);
-    let eps = Value::new(1e-8);
-
-    let p = prob.add(&eps);
-    let one_minus_p = one.sub(prob).add(&eps);
-    let term_pos = target.mul(&p.log());
-    let term_neg = one.sub(&target).mul(&one_minus_p.log());
-    -(term_pos.add(&term_neg))
+fn mean_loss(model: &Mlp, rows: &[([f32; 2], u8)]) -> f32 {
+    no_grad(|| {
+        let (x, y) = build_batch(rows);
+        let xb = Tensor::from_vec(x, vec![rows.len(), 2]);
+        let logits = model.forward(&xb);
+        let loss = cross_entropy_with_logits(&logits, &y);
+        loss.data()[0]
+    })
 }
 
 #[test]
-fn mlp_parameter_count_2_4_1_is_17() {
+fn mlp_tensor_forward_shape_is_batch_by_output() {
     reset_state();
-    let mlp = Mlp::new(&[2, 4, 1], 7);
-    let (weights, biases) = mlp.parameters();
-    assert_eq!(weights.len(), 12);
-    assert_eq!(biases.len(), 5);
-    assert_eq!(weights.len() + biases.len(), 17);
-}
-
-#[test]
-fn mlp_forward_output_shape_is_one() {
-    reset_state();
-    let mlp = Mlp::new(&[2, 4, 1], 7);
+    let model = Mlp::new(&[784, 128, 10], 7);
     with_grad(|| {
-        let x = vec![Value::new(0.25), Value::new(-0.75)];
-        let out = mlp.forward(&x);
-        assert_eq!(out.len(), 1);
+        let x = Tensor::from_vec(vec![0.0; 8 * 784], vec![8, 784]);
+        let out = model.forward(&x);
+        assert_eq!(out.shape(), vec![8, 10]);
     });
 }
 
 #[test]
-fn mlp_forward_output_shape_is_ten_for_mnist_head() {
+fn mlp_tensor_parameter_count_matches_dims() {
     reset_state();
-    let mlp = Mlp::new(&[784, 16, 10], 7);
-    with_grad(|| {
-        let x: Vec<Value> = (0..784).map(|_| Value::new(0.0)).collect();
-        let out = mlp.forward(&x);
-        assert_eq!(out.len(), 10);
-    });
+    let model = Mlp::new(&[784, 128, 10], 7);
+    let params = model.parameters();
+    assert_eq!(params.len(), 4);
+    let total_numel: usize = params.iter().map(Tensor::numel).sum();
+    assert_eq!(total_numel, 784 * 128 + 128 + 128 * 10 + 10);
 }
 
 #[test]
-fn mlp_init_is_deterministic_for_same_seed() {
+fn tensor_training_smoke_loss_decreases() {
     reset_state();
-    let a = Mlp::new(&[2, 4, 1], 1234);
-    let b = Mlp::new(&[2, 4, 1], 1234);
+    let model = Mlp::new(&[2, 8, 2], 42);
+    let mut optimizer = Sgd::new(model.parameters(), 0.1);
+    let mut rng = StdRng::seed_from_u64(11);
+    let mut rows = tiny_dataset();
+    let initial = mean_loss(&model, &rows);
 
-    let (wa, ba) = a.parameters();
-    let (wb, bb) = b.parameters();
-    assert_eq!(wa.len(), wb.len());
-    assert_eq!(ba.len(), bb.len());
+    for _ in 0..200 {
+        rows.shuffle(&mut rng);
+        optimizer.zero_grad();
 
-    for (va, vb) in wa.iter().zip(wb.iter()) {
-        assert_eq!(va.data(), vb.data());
-    }
-    for (va, vb) in ba.iter().zip(bb.iter()) {
-        assert_eq!(va.data(), vb.data());
-    }
-}
-
-#[test]
-#[should_panic(expected = "input length must match neuron weight count")]
-fn neuron_forward_panics_on_input_len_mismatch() {
-    reset_state();
-    let mut rng = StdRng::seed_from_u64(99);
-    let neuron = Neuron::new(2, &mut rng);
-    with_grad(|| {
-        let x = vec![Value::new(1.0)];
-        let _ = neuron.forward(&x);
-    });
-}
-
-#[test]
-fn training_smoke_loss_decreases() {
-    reset_state();
-    let dataset = xor_dataset(16, 0.08, 7);
-    let mlp = Mlp::new(&[2, 4, 1], 42);
-    let initial_loss = mean_loss_scalar(&mlp, &dataset);
-    let learning_rate = 1e-2;
-
-    for _ in 0..500 {
-        let (weights, biases) = mlp.parameters();
-        for p in weights.iter().chain(biases.iter()) {
-            p.zero_grad();
-        }
-
+        let (x, y) = build_batch(&rows);
         with_grad(|| {
-            let mean_loss = mean_loss_value(&mlp, &dataset);
-            mean_loss.backward();
+            let xb = Tensor::from_vec(x, vec![rows.len(), 2]);
+            let logits = model.forward(&xb);
+            let loss = cross_entropy_with_logits(&logits, &y);
+            loss.backward();
         });
 
-        for p in weights.iter().chain(biases.iter()) {
-            p.set_data(p.data() - learning_rate * p.grad());
-        }
+        optimizer.step();
     }
 
-    let final_loss = mean_loss_scalar(&mlp, &dataset);
+    let final_loss = mean_loss(&model, &rows);
     assert!(
-        final_loss < initial_loss,
-        "classification BCE did not decrease: initial={initial_loss}, final={final_loss}"
+        final_loss < initial,
+        "expected final loss < initial loss, got initial={initial}, final={final_loss}"
     );
 }

@@ -307,13 +307,13 @@ Acceptance:
 
 Scope:
 
-- Add `nn_tensor` with one-hidden-layer MLP support over tensor parameters.
-- Add batched MNIST training runtime (`tensor_mnist`) using mini-batch SGD.
+- Add `nn` with one-hidden-layer MLP support over engine parameters.
+- Add batched MNIST training runtime (`mnist`) using mini-batch SGD.
 - Keep dependency policy unchanged (`rand` + std only).
 
 Acceptance:
 
-- `cargo run --bin tensor_mnist` runs end-to-end batched training and prints train/eval metrics.
+- `cargo run --bin mnist` runs end-to-end batched training and prints train/eval metrics.
 
 ### Stage 11C - Verification + Accuracy Gate
 
@@ -342,13 +342,13 @@ Acceptance:
 Scope:
 
 - Remove fused CE from tensor core API/internal op dispatch.
-- Introduce `losses_tensor` module and compose CE from tensor primitives inside grad/no-grad contexts.
+- Introduce `losses` module and compose CE from engine primitives inside grad/no-grad contexts.
 - Keep tensor core focused on reusable primitive ops plus activation/reduction basics.
 
 Acceptance:
 
 - No `cross_entropy_with_logits` op/method remains in tensor core internals.
-- CE loss is available via `losses_tensor::cross_entropy_with_logits`.
+- CE loss is available via `losses::cross_entropy_with_logits`.
 
 ### Stage 11F - Optimizer Extraction
 

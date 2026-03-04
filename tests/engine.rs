@@ -1,388 +1,142 @@
-use micrograd::engine::{Op, Value, clear_graph, no_grad, reset_state, stats, with_grad};
+use micrograd::engine::{Tensor, clear_graph, no_grad, reset_state, stats, with_grad};
+use micrograd::losses::cross_entropy_with_logits;
 
-fn assert_close(actual: f64, expected: f64, eps: f64) {
+fn assert_close(actual: f32, expected: f32, eps: f32) {
     assert!(
         (actual - expected).abs() <= eps,
-        "expected {expected:.12}, got {actual:.12} (eps={eps})"
+        "expected {expected:.8}, got {actual:.8} (eps={eps})"
     );
 }
 
-fn eval_scalar_expr(x: f64) -> f64 {
-    no_grad(|| {
-        let x_node = Value::new(x);
-        let xx = x_node.mul(&x_node);
-        let s = xx.add(&x_node);
-        s.tanh().data()
-    })
+#[test]
+fn tensor_from_vec_shape_and_numel() {
+    reset_state();
+    let t = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+    assert_eq!(t.shape(), vec![2, 2]);
+    assert_eq!(t.numel(), 4);
+    assert_eq!(t.data(), vec![1.0, 2.0, 3.0, 4.0]);
 }
 
 #[test]
-fn value_new_works_on_default_tape() {
+fn matmul_and_add_bias_forward() {
     reset_state();
-    let v = Value::new(1.0);
-    assert_close(v.data(), 1.0, 1e-12);
-
-    let snapshot = stats();
-    assert_eq!(snapshot.generation, 0);
-    assert_eq!(snapshot.context_depth, 0);
-    assert!(snapshot.with_grad_active);
+    let x = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+    let w = Tensor::from_vec(vec![5.0, 6.0, 7.0, 8.0], vec![2, 2]);
+    let b = Tensor::from_vec(vec![1.0, -1.0], vec![2]);
+    let y = x.matmul(&w).add_row_bias(&b);
+    assert_eq!(y.shape(), vec![2, 2]);
+    assert_eq!(y.data(), vec![20.0, 21.0, 44.0, 49.0]);
 }
 
 #[test]
-fn value_basics_work_inside_with_grad() {
+fn matmul_rectangular_forward_is_correct() {
     reset_state();
-    with_grad(|| {
-        let v = Value::new(3.5);
-        assert_close(v.data(), 3.5, 1e-12);
-        assert_close(v.grad(), 0.0, 1e-12);
-        assert!(v.is_leaf());
-        assert_eq!(v.op(), None);
-        assert_eq!(v.parents().len(), 0);
-
-        v.set_data(-1.25);
-        assert_close(v.data(), -1.25, 1e-12);
-        v.set_grad(2.0);
-        v.add_grad(0.5);
-        assert_close(v.grad(), 2.5, 1e-12);
-        v.zero_grad();
-        assert_close(v.grad(), 0.0, 1e-12);
-    });
+    let x = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
+    let w = Tensor::from_vec(vec![1.0, 2.0, 0.0, 1.0, 2.0, 3.0], vec![3, 2]);
+    let y = x.matmul(&w);
+    assert_eq!(y.shape(), vec![2, 2]);
+    assert_eq!(y.data(), vec![7.0, 13.0, 16.0, 31.0]);
 }
 
 #[test]
-fn forward_ops_are_correct() {
+fn matmul_backward_mean_matches_expected_gradients() {
     reset_state();
-    with_grad(|| {
-        let a = Value::new(4.0);
-        let b = Value::new(2.0);
+    let a = Tensor::parameter(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+    let b = Tensor::parameter(vec![5.0, 6.0, 7.0, 8.0], vec![2, 2]);
+    let loss = a.matmul(&b).mean();
+    loss.backward();
 
-        let sum = a.add(&b);
-        assert_close(sum.data(), 6.0, 1e-12);
-        assert_eq!(sum.op(), Some(Op::Add));
+    let a_grad = a.grad();
+    let b_grad = b.grad();
 
-        let product = a.mul(&b);
-        assert_close(product.data(), 8.0, 1e-12);
-        assert_eq!(product.op(), Some(Op::Mul));
+    let expected_a = [2.75, 3.75, 2.75, 3.75];
+    let expected_b = [1.0, 1.0, 1.5, 1.5];
 
-        let diff = a.sub(&b);
-        assert_close(diff.data(), 2.0, 1e-12);
-        assert_eq!(diff.op(), Some(Op::Sub));
-
-        let quotient = a.div(&b);
-        assert_close(quotient.data(), 2.0, 1e-12);
-        assert_eq!(quotient.op(), Some(Op::Div));
-
-        let negated = -a;
-        assert_close(negated.data(), -4.0, 1e-12);
-        assert_eq!(negated.op(), Some(Op::Neg));
-
-        let exponent = Value::new(2.0);
-        let power = a.pow(&exponent);
-        assert_close(power.data(), 16.0, 1e-12);
-        assert_eq!(power.op(), Some(Op::Pow));
-    });
+    for (actual, expected) in a_grad.iter().zip(expected_a.iter()) {
+        assert_close(*actual, *expected, 1e-5);
+    }
+    for (actual, expected) in b_grad.iter().zip(expected_b.iter()) {
+        assert_close(*actual, *expected, 1e-5);
+    }
 }
 
 #[test]
-fn unary_ops_are_correct() {
+fn relu_mean_backward_is_correct() {
     reset_state();
-    with_grad(|| {
-        let x = Value::new(1.0);
-        assert_close(x.exp().data(), std::f64::consts::E, 1e-12);
-
-        let e = Value::new(std::f64::consts::E);
-        assert_close(e.log().data(), 1.0, 1e-12);
-
-        let t = Value::new(0.5);
-        assert_close(t.tanh().data(), 0.5f64.tanh(), 1e-12);
-
-        let neg = Value::new(-3.0).relu();
-        assert_close(neg.data(), 0.0, 1e-12);
-
-        let pos = Value::new(2.5).relu();
-        assert_close(pos.data(), 2.5, 1e-12);
-    });
+    let x = Tensor::parameter(vec![-1.0, 2.0, 3.0], vec![1, 3]);
+    let loss = x.relu().mean();
+    loss.backward();
+    let g = x.grad();
+    assert_eq!(g.len(), 3);
+    assert_close(g[0], 0.0, 1e-6);
+    assert_close(g[1], 1.0 / 3.0, 1e-6);
+    assert_close(g[2], 1.0 / 3.0, 1e-6);
 }
 
 #[test]
-fn backward_chain_rule_shared_subgraph() {
+fn cross_entropy_backward_row_sums_are_zero() {
     reset_state();
-    with_grad(|| {
-        let a = Value::new(2.0);
-        let b = Value::new(3.0);
-        let shared = a.mul(&b);
-        let out = shared.add(&shared);
-
-        out.backward();
-
-        assert_close(out.grad(), 1.0, 1e-12);
-        assert_close(shared.grad(), 2.0, 1e-12);
-        assert_close(a.grad(), 6.0, 1e-12);
-        assert_close(b.grad(), 4.0, 1e-12);
-    });
+    let logits = Tensor::parameter(vec![1.0, 2.0, 3.0, 0.5, 1.0, -1.0], vec![2, 3]);
+    let loss = cross_entropy_with_logits(&logits, &[2, 0]);
+    loss.backward();
+    let g = logits.grad();
+    assert_eq!(g.len(), 6);
+    let row0 = g[0] + g[1] + g[2];
+    let row1 = g[3] + g[4] + g[5];
+    assert_close(row0, 0.0, 1e-5);
+    assert_close(row1, 0.0, 1e-5);
 }
 
 #[test]
-fn operator_and_method_paths_match() {
+fn no_grad_backward_panics() {
     reset_state();
-    with_grad(|| {
-        let mx = Value::new(2.0);
-        let my = Value::new(-3.0);
-        let mz = Value::new(10.0);
-        let m_out = mx.mul(&my).add(&mx).add(&mz).tanh();
-        m_out.backward();
-
-        let m_val = m_out.data();
-        let mx_grad = mx.grad();
-        let my_grad = my.grad();
-        let mz_grad = mz.grad();
-
-        let ox = Value::new(2.0);
-        let oy = Value::new(-3.0);
-        let oz = Value::new(10.0);
-        let o_out = (&(&ox * &oy) + &ox + oz).tanh();
-        o_out.backward();
-
-        assert_close(m_val, o_out.data(), 1e-12);
-        assert_close(mx_grad, ox.grad(), 1e-12);
-        assert_close(my_grad, oy.grad(), 1e-12);
-        assert_close(mz_grad, oz.grad(), 1e-12);
-    });
-}
-
-#[test]
-fn finite_difference_sanity() {
-    reset_state();
-    let x0 = 1.5;
-
-    let x = Value::new(x0);
-    let xx = x.mul(&x);
-    let s = xx.add(&x);
-    let out = s.tanh();
-    out.backward();
-    let analytical = x.grad();
-
-    let h = 1e-6;
-    let numerical = (eval_scalar_expr(x0 + h) - eval_scalar_expr(x0 - h)) / (2.0 * h);
-
-    assert_close(analytical, numerical, 1e-6);
-}
-
-#[test]
-fn no_grad_does_not_leak_temps() {
-    reset_state();
-    let baseline = stats().temp_count;
-
-    let data = no_grad(|| {
-        let a = Value::new(1.5);
-        let b = a.tanh();
-        let c = b.exp();
-        c.data()
-    });
-
-    assert!(data.is_finite());
-    assert_eq!(stats().temp_count, baseline);
-}
-
-#[test]
-fn no_grad_inside_with_grad_restores_outer_graph() {
-    reset_state();
-    with_grad(|| {
-        let x = Value::new(2.0);
-        let before = stats().temp_count;
-
-        let probe = no_grad(|| {
-            let t = x.tanh().exp();
-            t.data()
-        });
-        assert!(probe.is_finite());
-        assert_eq!(stats().temp_count, before);
-
-        let y = x.mul(&x);
-        y.backward();
-        assert_close(x.grad(), 4.0, 1e-12);
-    });
-}
-
-#[test]
-fn nested_with_grad_is_allowed() {
-    reset_state();
-    with_grad(|| {
-        let outer = Value::new(2.0);
-
-        with_grad(|| {
-            let inner = outer.mul(&Value::new(3.0));
-            assert_close(inner.data(), 6.0, 1e-12);
-        });
-
-        let z = outer.mul(&outer);
-        z.backward();
-        assert_close(outer.grad(), 4.0, 1e-12);
-    });
-}
-
-#[test]
-fn inner_scope_values_are_stale_after_exit() {
-    reset_state();
-
-    with_grad(|| {
-        let inner = with_grad(|| Value::new(5.0));
-        let stale = std::panic::catch_unwind(|| inner.data());
-        assert!(
-            stale.is_err(),
-            "inner-scope value should be stale after exit"
-        );
-    });
-}
-
-#[test]
-fn backward_on_default_tape_works() {
-    reset_state();
-
-    let a = Value::new(2.0);
-    let b = Value::new(3.0);
-    let out = a.mul(&b);
-    out.backward();
-
-    assert_close(a.grad(), 3.0, 1e-12);
-    assert_close(b.grad(), 2.0, 1e-12);
-}
-
-#[test]
-fn backward_on_no_grad_value_panics() {
-    reset_state();
-
     let result = std::panic::catch_unwind(|| {
         no_grad(|| {
-            let a = Value::new(2.0);
-            let b = Value::new(3.0);
-            let out = a.mul(&b);
-            out.backward();
+            let logits = Tensor::from_vec(vec![1.0, 2.0, 3.0], vec![1, 3]);
+            let loss = cross_entropy_with_logits(&logits, &[2]);
+            loss.backward();
         });
     });
-    assert!(result.is_err(), "backward on no_grad value should panic");
+    assert!(result.is_err());
 }
 
 #[test]
-fn ancestor_root_backward_allowed_while_nested() {
+fn stale_inner_tensor_panics_after_scope_exit() {
     reset_state();
-
     with_grad(|| {
-        let x = Value::new(2.0);
-        let root = x.mul(&x);
-
-        with_grad(|| {
-            let _inner = x.mul(&Value::new(3.0));
-            root.backward();
-        });
-
-        assert_close(x.grad(), 4.0, 1e-12);
+        let inner = with_grad(|| Tensor::from_vec(vec![1.0, 2.0], vec![1, 2]));
+        let stale = std::panic::catch_unwind(|| inner.data());
+        assert!(stale.is_err());
     });
 }
 
 #[test]
-fn backward_with_options_is_compatible() {
+fn tensor_parameters_survive_clear_graph() {
     reset_state();
-
-    let a = Value::new(2.0);
-    let b = Value::new(3.0);
-    let out = a.mul(&b);
-
-    out.backward_with_options(true);
-    assert_close(a.grad(), 3.0, 1e-12);
-    out.backward();
-    assert_close(a.grad(), 6.0, 1e-12);
-}
-
-#[test]
-fn two_losses_in_same_tape_work() {
-    reset_state();
-    let w = Value::parameter(1.5);
-
-    let x1 = Value::new(2.0);
-    let l1 = w.mul(&x1);
-    l1.backward();
-    assert_close(w.grad(), 2.0, 1e-12);
-
-    let x2 = Value::new(-3.0);
-    let l2 = w.mul(&x2);
-    l2.backward();
-    assert_close(w.grad(), -1.0, 1e-12);
-}
-
-#[test]
-fn parameters_survive_context_cleanup_and_clear_graph() {
-    reset_state();
-    let p = Value::parameter(1.0);
-
+    let p = Tensor::parameter(vec![2.0], vec![1]);
     with_grad(|| {
-        let x = Value::new(2.0);
-        let y = x.mul(&p);
-        y.backward();
-        assert_close(p.grad(), 2.0, 1e-12);
+        let x = Tensor::from_vec(vec![3.0], vec![1, 1]);
+        let y = x.matmul(&Tensor::from_vec(vec![1.0], vec![1, 1])).mean();
+        let _ = y.data();
     });
-
-    assert_close(p.data(), 1.0, 1e-12);
-    p.set_data(3.0);
-    assert_close(p.data(), 3.0, 1e-12);
-
     clear_graph();
-    assert_close(p.data(), 3.0, 1e-12);
+    assert_eq!(p.data(), vec![2.0]);
 }
 
 #[test]
-fn clear_graph_panics_with_active_scope() {
+fn tensor_stats_track_context_depth() {
     reset_state();
-
-    let result = std::panic::catch_unwind(|| {
-        with_grad(|| {
-            clear_graph();
-        });
-    });
-
-    assert!(
-        result.is_err(),
-        "clear_graph should panic inside active scope"
-    );
-}
-
-#[test]
-fn stats_temp_count_includes_all_active_tapes() {
-    reset_state();
+    let s0 = stats();
+    assert_eq!(s0.context_depth, 0);
 
     with_grad(|| {
-        let _outer_node = Value::new(1.0);
-        let outer = stats();
-        let outer_temp_count = outer.temp_count;
-
-        assert_eq!(outer.context_depth, 1);
-        assert!(outer_temp_count >= 1);
-
+        let _t = Tensor::from_vec(vec![0.0], vec![1]);
+        let s1 = stats();
+        assert_eq!(s1.context_depth, 1);
         with_grad(|| {
-            let _inner_node = Value::new(2.0);
-            let nested = stats();
-            assert_eq!(nested.context_depth, 2);
-            assert_eq!(nested.temp_count, outer_temp_count + 1);
+            let _u = Tensor::from_vec(vec![1.0], vec![1]);
+            let s2 = stats();
+            assert_eq!(s2.context_depth, 2);
         });
-
-        let after_nested = stats();
-        assert_eq!(after_nested.context_depth, 1);
-        assert_eq!(after_nested.temp_count, outer_temp_count);
     });
-}
-
-#[test]
-fn deep_chain_backward_stays_correct() {
-    reset_state();
-
-    let x0 = Value::new(1.25);
-    let mut out = x0;
-
-    for _ in 0..8000 {
-        out = out.mul(&Value::new(1.0001));
-    }
-
-    out.backward();
-    assert!(x0.grad().is_finite(), "deep-chain grad should be finite");
-    assert!(x0.grad() > 0.0, "deep-chain grad should stay positive");
 }

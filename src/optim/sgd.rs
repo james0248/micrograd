@@ -1,5 +1,5 @@
+use crate::engine::Tensor;
 use crate::optim::Optimizer;
-use crate::tensor::Tensor;
 
 #[derive(Debug, Clone)]
 pub struct Sgd {

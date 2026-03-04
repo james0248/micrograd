@@ -1,5 +1,5 @@
 fn main() {
     if let Err(err) = micrograd::mnist::run() {
-        panic!("micrograd failed: {err}");
+        panic!("mnist failed: {err}");
     }
 }

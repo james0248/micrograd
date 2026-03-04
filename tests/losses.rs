@@ -1,5 +1,5 @@
-use micrograd::losses_tensor::cross_entropy_with_logits;
-use micrograd::tensor::{Tensor, reset_state};
+use micrograd::engine::{Tensor, reset_state};
+use micrograd::losses::cross_entropy_with_logits;
 
 fn assert_close(actual: f32, expected: f32, eps: f32) {
     assert!(

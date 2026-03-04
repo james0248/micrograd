@@ -1,4 +1,4 @@
-use crate::tensor::Tensor;
+use crate::engine::Tensor;
 
 pub fn cross_entropy_with_logits(logits: &Tensor, targets: &[u8]) -> Tensor {
     let shape = logits.shape();

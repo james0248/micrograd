@@ -1,9 +1,7 @@
 pub mod data;
 pub mod engine;
-pub mod losses_tensor;
+pub mod losses;
+pub mod mnist;
 pub mod nn;
-pub mod nn_tensor;
 pub mod optim;
-pub mod tensor;
-pub mod tensor_mnist;
 pub mod utils;

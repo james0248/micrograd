@@ -1,24 +1,28 @@
 mod engine;
-mod value;
+mod kernels;
+mod tensor;
 
-pub use value::Value;
+pub use tensor::Tensor;
 
 use std::sync::Mutex;
 
 use engine::{ContextKind, Engine};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Op {
+    MatMul2D,
+    AddRowBias,
     Add,
-    Mul,
     Sub,
+    Mul,
     Div,
-    Neg,
-    Pow,
-    Tanh,
     Exp,
     Log,
+    SumRowsKeepDim,
+    SubRowwise,
+    DivRowwise,
     Relu,
+    Mean,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

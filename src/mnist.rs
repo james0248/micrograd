@@ -4,10 +4,10 @@ use rand::seq::SliceRandom;
 use std::time::Instant;
 
 use crate::data::{MnistSample, load_and_split_mnist};
-use crate::losses_tensor::cross_entropy_with_logits;
-use crate::nn_tensor::MlpTensor;
+use crate::engine::{Tensor, no_grad, with_grad};
+use crate::losses::cross_entropy_with_logits;
+use crate::nn::Mlp;
 use crate::optim::{Optimizer, Sgd};
-use crate::tensor::{Tensor, no_grad, with_grad};
 
 const DATA_PATH: &str = "data/train.csv";
 const EVAL_RATIO: f64 = 0.10;
@@ -66,7 +66,7 @@ fn argmax(row: &[f32]) -> usize {
         .expect("row must not be empty")
 }
 
-fn evaluate(model: &MlpTensor, dataset: &FlatMnist) -> (f32, f32) {
+fn evaluate(model: &Mlp, dataset: &FlatMnist) -> (f32, f32) {
     if dataset.rows == 0 {
         return (0.0, 0.0);
     }
@@ -117,7 +117,7 @@ pub fn run() -> Result<(), String> {
         train.rows, eval.rows, BATCH_SIZE
     );
 
-    let model = MlpTensor::new(&[train.cols, 128, 10], MODEL_SEED);
+    let model = Mlp::new(&[train.cols, 128, 10], MODEL_SEED);
     let mut optimizer = Sgd::new(model.parameters(), learning_rate_for_epoch(0));
 
     let mut rng = StdRng::seed_from_u64(SHUFFLE_SEED);

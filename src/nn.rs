@@ -1,77 +1,44 @@
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use crate::engine::Value;
+use crate::engine::Tensor;
 
-#[derive(Debug, Clone, Default)]
-pub struct Neuron {
-    pub weights: Vec<Value>,
-    pub bias: Value,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct Layer {
-    pub neurons: Vec<Neuron>,
+#[derive(Debug, Clone)]
+pub struct Linear {
+    pub weight: Tensor,
+    pub bias: Tensor,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Mlp {
-    pub layers: Vec<Layer>,
+    pub layers: Vec<Linear>,
 }
 
-impl Neuron {
-    pub fn new(nin: usize, rng: &mut StdRng) -> Self {
-        let weights = (0..nin)
-            .map(|_| Value::parameter(rng.gen_range(-1.0..1.0)))
-            .collect();
+impl Linear {
+    pub fn new(nin: usize, nout: usize, rng: &mut StdRng) -> Self {
+        assert!(nin > 0, "nin must be > 0");
+        assert!(nout > 0, "nout must be > 0");
+
+        let scale = (1.0f32 / nin as f32).sqrt();
+        let mut w = Vec::with_capacity(nin * nout);
+        for _ in 0..(nin * nout) {
+            w.push(rng.gen_range(-scale..scale));
+        }
+
+        let b = vec![0.0; nout];
 
         Self {
-            weights,
-            bias: Value::parameter(0.0),
+            weight: Tensor::parameter(w, vec![nin, nout]),
+            bias: Tensor::parameter(b, vec![nout]),
         }
     }
 
-    pub fn forward(&self, x: &[Value]) -> Value {
-        assert_eq!(
-            x.len(),
-            self.weights.len(),
-            "input length must match neuron weight count"
-        );
-
-        let mut out = self.bias;
-        for (w, xi) in self.weights.iter().zip(x.iter()) {
-            let wx = *w * *xi;
-            out = out + wx;
-        }
-        out
+    pub fn forward(&self, x: &Tensor) -> Tensor {
+        x.matmul(&self.weight).add_row_bias(&self.bias)
     }
 
-    pub fn parameters(&self) -> (Vec<Value>, Vec<Value>) {
-        (self.weights.clone(), vec![self.bias])
-    }
-}
-
-impl Layer {
-    pub fn new(nin: usize, nout: usize, rng: &mut StdRng) -> Self {
-        let neurons = (0..nout).map(|_| Neuron::new(nin, rng)).collect();
-        Self { neurons }
-    }
-
-    pub fn forward(&self, x: &[Value]) -> Vec<Value> {
-        self.neurons.iter().map(|n| n.forward(x)).collect()
-    }
-
-    pub fn parameters(&self) -> (Vec<Value>, Vec<Value>) {
-        let mut weights = Vec::new();
-        let mut biases = Vec::new();
-
-        for neuron in &self.neurons {
-            let (neuron_weights, neuron_biases) = neuron.parameters();
-            weights.extend(neuron_weights);
-            biases.extend(neuron_biases);
-        }
-
-        (weights, biases)
+    pub fn parameters(&self) -> Vec<Tensor> {
+        vec![self.weight, self.bias]
     }
 }
 
@@ -85,37 +52,29 @@ impl Mlp {
         let mut rng = StdRng::seed_from_u64(seed);
         let layers = dims
             .windows(2)
-            .map(|pair| Layer::new(pair[0], pair[1], &mut rng))
+            .map(|pair| Linear::new(pair[0], pair[1], &mut rng))
             .collect();
 
         Self { layers }
     }
 
-    pub fn forward(&self, x: &[Value]) -> Vec<Value> {
-        let mut activations: Vec<Value> = x.to_vec();
+    pub fn forward(&self, x: &Tensor) -> Tensor {
+        let mut out = *x;
         let last_idx = self.layers.len().saturating_sub(1);
-
         for (idx, layer) in self.layers.iter().enumerate() {
-            let mut out = layer.forward(&activations);
+            out = layer.forward(&out);
             if idx < last_idx {
-                out = out.into_iter().map(|v| v.tanh()).collect();
+                out = out.relu();
             }
-            activations = out;
         }
-
-        activations
+        out
     }
 
-    pub fn parameters(&self) -> (Vec<Value>, Vec<Value>) {
-        let mut weights = Vec::new();
-        let mut biases = Vec::new();
-
+    pub fn parameters(&self) -> Vec<Tensor> {
+        let mut out = Vec::new();
         for layer in &self.layers {
-            let (layer_weights, layer_biases) = layer.parameters();
-            weights.extend(layer_weights);
-            biases.extend(layer_biases);
+            out.extend(layer.parameters());
         }
-
-        (weights, biases)
+        out
     }
 }
