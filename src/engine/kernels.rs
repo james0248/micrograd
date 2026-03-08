@@ -1,13 +1,20 @@
 use std::thread;
 
+fn available_threads() -> usize {
+    use std::sync::OnceLock;
+    static THREADS: OnceLock<usize> = OnceLock::new();
+    *THREADS.get_or_init(|| {
+        thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    })
+}
+
 fn worker_count(rows: usize) -> usize {
     if rows == 0 {
         return 1;
     }
-    let available = thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
-    available.min(rows).max(1)
+    available_threads().min(rows).max(1)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -49,6 +56,34 @@ fn validate_bounds(data_len: usize, m: MatRef, side: &str) {
     );
 }
 
+fn matmul_rows(
+    out: &mut [f32],
+    a: &[f32],
+    a_mat: MatRef,
+    b: &[f32],
+    b_mat: MatRef,
+    row_start: usize,
+    num_rows: usize,
+) {
+    let k = a_mat.cols;
+    let cols = b_mat.cols;
+    for local_i in 0..num_rows {
+        let i = row_start + local_i;
+        let out_row = &mut out[local_i * cols..(local_i + 1) * cols];
+        let a_base = a_mat.offset + i * a_mat.row_stride;
+        for j in 0..cols {
+            let b_base = b_mat.offset + j * b_mat.col_stride;
+            let mut acc = 0.0f32;
+            for kk in 0..k {
+                let a_idx = a_base + kk * a_mat.col_stride;
+                let b_idx = b_base + kk * b_mat.row_stride;
+                acc += a[a_idx] * b[b_idx];
+            }
+            out_row[j] = acc;
+        }
+    }
+}
+
 pub(super) fn matmul(a: &[f32], a_mat: MatRef, b: &[f32], b_mat: MatRef) -> Vec<f32> {
     assert_eq!(
         a_mat.cols,
@@ -74,20 +109,7 @@ pub(super) fn matmul(a: &[f32], a_mat: MatRef, b: &[f32], b_mat: MatRef) -> Vec<
         .and_then(|v| v.checked_mul(k))
         .unwrap_or(usize::MAX);
     if workers == 1 || ops < 256_000 {
-        for i in 0..rows {
-            let out_row = &mut out[i * cols..(i + 1) * cols];
-            let a_base = a_mat.offset + i * a_mat.row_stride;
-            for j in 0..cols {
-                let b_base = b_mat.offset + j * b_mat.col_stride;
-                let mut acc = 0.0f32;
-                for kk in 0..k {
-                    let a_idx = a_base + kk * a_mat.col_stride;
-                    let b_idx = b_base + kk * b_mat.row_stride;
-                    acc += a[a_idx] * b[b_idx];
-                }
-                out_row[j] = acc;
-            }
-        }
+        matmul_rows(&mut out, a, a_mat, b, b_mat, 0, rows);
         return out;
     }
 
@@ -99,22 +121,7 @@ pub(super) fn matmul(a: &[f32], a_mat: MatRef, b: &[f32], b_mat: MatRef) -> Vec<
             let chunk_rows = out_chunk.len() / cols;
 
             scope.spawn(move || {
-                for local_i in 0..chunk_rows {
-                    let i = row_start + local_i;
-                    let out_row = &mut out_chunk[local_i * cols..(local_i + 1) * cols];
-                    let a_base = a_mat.offset + i * a_mat.row_stride;
-
-                    for j in 0..cols {
-                        let b_base = b_mat.offset + j * b_mat.col_stride;
-                        let mut acc = 0.0f32;
-                        for kk in 0..k {
-                            let a_idx = a_base + kk * a_mat.col_stride;
-                            let b_idx = b_base + kk * b_mat.row_stride;
-                            acc += a[a_idx] * b[b_idx];
-                        }
-                        out_row[j] = acc;
-                    }
-                }
+                matmul_rows(out_chunk, a, a_mat, b, b_mat, row_start, chunk_rows);
             });
         }
     });

@@ -1,4 +1,4 @@
-use micrograd::engine::{Tensor, clear_graph, no_grad, reset_state, stats, with_grad};
+use micrograd::engine::{Tensor, clear_graph, no_grad, reset_state, with_grad};
 use micrograd::losses::cross_entropy_with_logits;
 
 fn assert_close(actual: f32, expected: f32, eps: f32) {
@@ -160,24 +160,6 @@ fn tensor_parameters_survive_clear_graph() {
     });
     clear_graph();
     assert_eq!(p.data(), vec![2.0]);
-}
-
-#[test]
-fn tensor_stats_track_context_depth() {
-    reset_state();
-    let s0 = stats();
-    assert_eq!(s0.context_depth, 0);
-
-    with_grad(|| {
-        let _t = Tensor::from_vec(vec![0.0], vec![1]);
-        let s1 = stats();
-        assert_eq!(s1.context_depth, 1);
-        with_grad(|| {
-            let _u = Tensor::from_vec(vec![1.0], vec![1]);
-            let s2 = stats();
-            assert_eq!(s2.context_depth, 2);
-        });
-    });
 }
 
 #[test]

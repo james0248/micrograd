@@ -347,10 +347,6 @@ impl Engine {
         self.active_tape().kind
     }
 
-    pub(super) fn is_with_grad_active(&self) -> bool {
-        self.active_kind().recording()
-    }
-
     fn find_tape_pos(&self, generation: u64) -> Option<usize> {
         self.tapes
             .iter()
@@ -443,7 +439,7 @@ impl Engine {
             .unwrap_or_else(|| panic!("invalid parameter index {idx}"))
     }
 
-    fn layout_of(&self, value: Tensor) -> NodeLayout {
+    pub(super) fn layout_of(&self, value: Tensor) -> NodeLayout {
         match value.handle {
             Handle::Param { idx } => self.param(idx).layout.clone(),
             Handle::Temp {
@@ -452,10 +448,6 @@ impl Engine {
                 id,
             } => self.temp(generation, idx, id).layout.clone(),
         }
-    }
-
-    pub(super) fn layout_of_value(&self, value: Tensor) -> NodeLayout {
-        self.layout_of(value)
     }
 
     pub(super) fn buffer_of(&self, buffer_id: usize) -> &[f32] {
@@ -586,7 +578,11 @@ impl Engine {
             strides: contiguous_strides(&shape),
             offset: 0,
         };
-        let grad = vec![0.0; numel(&shape)];
+        let grad = if recording {
+            vec![0.0; numel(&shape)]
+        } else {
+            Vec::new()
+        };
         let tape = self.active_tape_mut();
         let idx = tape.nodes.len();
         tape.nodes.push(TempNode {
@@ -637,7 +633,11 @@ impl Engine {
             (None, Parents::None)
         };
 
-        let grad = vec![0.0; numel(&layout.shape)];
+        let grad = if recording {
+            vec![0.0; numel(&layout.shape)]
+        } else {
+            Vec::new()
+        };
         let tape = self.active_tape_mut();
         let idx = tape.nodes.len();
         tape.nodes.push(TempNode {
@@ -810,7 +810,7 @@ impl Engine {
         }
     }
 
-    pub(super) fn op_of(&self, value: Tensor) -> Option<Op> {
+    fn op_of(&self, value: Tensor) -> Option<Op> {
         match value.handle {
             Handle::Param { .. } => None,
             Handle::Temp {
@@ -1223,8 +1223,9 @@ impl Engine {
                 let out_strides = contiguous_strides(&out_shape);
                 let mut da = vec![0.0; numel(&a_shape)];
                 let mut a_i = 0usize;
+                let mut out_coords = vec![0usize; a_shape.len()];
                 for_each_index(&a_shape, |coords| {
-                    let mut out_coords = coords.to_vec();
+                    out_coords.copy_from_slice(coords);
                     out_coords.swap(dim0, dim1);
                     let out_i = offset_from_coords(&out_coords, &out_strides);
                     da[a_i] = out_grad[out_i];
@@ -1322,11 +1323,4 @@ impl Engine {
         order
     }
 
-    pub(super) fn param_count(&self) -> usize {
-        self.params.len()
-    }
-
-    pub(super) fn temp_count(&self) -> usize {
-        self.tapes.iter().map(|tape| tape.nodes.len()).sum()
-    }
 }

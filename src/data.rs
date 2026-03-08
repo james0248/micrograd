@@ -9,7 +9,7 @@ use crate::utils::split_train_and_eval;
 #[derive(Debug, Clone, PartialEq)]
 pub struct MnistSample {
     pub label: u8,
-    pub pixels: [f64; 784],
+    pub pixels: [f32; 784],
 }
 
 pub fn load_mnist_csv(path: &str) -> Result<Vec<MnistSample>, String> {
@@ -47,7 +47,7 @@ pub fn load_mnist_csv(path: &str) -> Result<Vec<MnistSample>, String> {
             ));
         }
 
-        let mut pixels = [0.0; 784];
+        let mut pixels = [0.0f32; 784];
         for (pix_idx, slot) in pixels.iter_mut().enumerate() {
             let tok = cols.next().ok_or_else(|| {
                 format!(
@@ -64,7 +64,7 @@ pub fn load_mnist_csv(path: &str) -> Result<Vec<MnistSample>, String> {
                     pix_idx, raw_px
                 ));
             }
-            *slot = raw_px as f64 / 255.0;
+            *slot = raw_px as f32 / 255.0;
         }
 
         if cols.next().is_some() {

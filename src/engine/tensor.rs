@@ -41,6 +41,47 @@ fn binary_broadcast_forward(
     (out, out_shape)
 }
 
+fn binary_elementwise(
+    a: &Tensor,
+    b: &Tensor,
+    op: Op,
+    f: impl Fn(f32, f32) -> f32,
+) -> Tensor {
+    with_engine(|engine| {
+        let a_layout = engine.layout_of(*a);
+        let b_layout = engine.layout_of(*b);
+        let a_data = engine.buffer_of(a_layout.buffer_id);
+        let b_data = engine.buffer_of(b_layout.buffer_id);
+        let (out, out_shape) = binary_broadcast_forward(
+            a_data,
+            &a_layout.shape,
+            &a_layout.strides,
+            a_layout.offset,
+            b_data,
+            &b_layout.shape,
+            &b_layout.strides,
+            b_layout.offset,
+            f,
+        );
+        engine.create_from_op(out, out_shape, op, Parents::Binary(*a, *b))
+    })
+}
+
+fn unary_map(a: &Tensor, op: Op, f: impl Fn(f32) -> f32) -> Tensor {
+    with_engine(|engine| {
+        let layout = engine.layout_of(*a);
+        let data = engine.buffer_of(layout.buffer_id);
+        let mut out = vec![0.0; numel(&layout.shape)];
+        let mut out_i = 0usize;
+        for_each_index(&layout.shape, |coords| {
+            let i = layout.offset + offset_from_coords(coords, &layout.strides);
+            out[out_i] = f(data[i]);
+            out_i += 1;
+        });
+        engine.create_from_op(out, layout.shape, op, Parents::Unary(*a))
+    })
+}
+
 impl Tensor {
     pub fn from_vec(data: Vec<f32>, shape: Vec<usize>) -> Self {
         assert_eq!(
@@ -109,14 +150,10 @@ impl Tensor {
         with_engine(|engine| engine.zero_grad(*self));
     }
 
-    pub fn is_leaf(&self) -> bool {
-        with_engine(|engine| matches!(engine.parents_of(*self), Parents::None))
-    }
-
     pub fn matmul(&self, other: &Tensor) -> Tensor {
         with_engine(|engine| {
-            let a_layout = engine.layout_of_value(*self);
-            let b_layout = engine.layout_of_value(*other);
+            let a_layout = engine.layout_of(*self);
+            let b_layout = engine.layout_of(*other);
             let a_shape = a_layout.shape.clone();
             let b_shape = b_layout.shape.clone();
             assert!(
@@ -186,122 +223,32 @@ impl Tensor {
     }
 
     pub fn add(&self, other: &Tensor) -> Tensor {
-        with_engine(|engine| {
-            let a_layout = engine.layout_of_value(*self);
-            let b_layout = engine.layout_of_value(*other);
-            let a = engine.buffer_of(a_layout.buffer_id);
-            let b = engine.buffer_of(b_layout.buffer_id);
-            let (out, out_shape) = binary_broadcast_forward(
-                a,
-                &a_layout.shape,
-                &a_layout.strides,
-                a_layout.offset,
-                b,
-                &b_layout.shape,
-                &b_layout.strides,
-                b_layout.offset,
-                |x, y| x + y,
-            );
-            engine.create_from_op(out, out_shape, Op::Add, Parents::Binary(*self, *other))
-        })
+        binary_elementwise(self, other, Op::Add, |x, y| x + y)
     }
 
     pub fn sub(&self, other: &Tensor) -> Tensor {
-        with_engine(|engine| {
-            let a_layout = engine.layout_of_value(*self);
-            let b_layout = engine.layout_of_value(*other);
-            let a = engine.buffer_of(a_layout.buffer_id);
-            let b = engine.buffer_of(b_layout.buffer_id);
-            let (out, out_shape) = binary_broadcast_forward(
-                a,
-                &a_layout.shape,
-                &a_layout.strides,
-                a_layout.offset,
-                b,
-                &b_layout.shape,
-                &b_layout.strides,
-                b_layout.offset,
-                |x, y| x - y,
-            );
-            engine.create_from_op(out, out_shape, Op::Sub, Parents::Binary(*self, *other))
-        })
+        binary_elementwise(self, other, Op::Sub, |x, y| x - y)
     }
 
     pub fn mul(&self, other: &Tensor) -> Tensor {
-        with_engine(|engine| {
-            let a_layout = engine.layout_of_value(*self);
-            let b_layout = engine.layout_of_value(*other);
-            let a = engine.buffer_of(a_layout.buffer_id);
-            let b = engine.buffer_of(b_layout.buffer_id);
-            let (out, out_shape) = binary_broadcast_forward(
-                a,
-                &a_layout.shape,
-                &a_layout.strides,
-                a_layout.offset,
-                b,
-                &b_layout.shape,
-                &b_layout.strides,
-                b_layout.offset,
-                |x, y| x * y,
-            );
-            engine.create_from_op(out, out_shape, Op::Mul, Parents::Binary(*self, *other))
-        })
+        binary_elementwise(self, other, Op::Mul, |x, y| x * y)
     }
 
     pub fn div(&self, other: &Tensor) -> Tensor {
-        with_engine(|engine| {
-            let a_layout = engine.layout_of_value(*self);
-            let b_layout = engine.layout_of_value(*other);
-            let a = engine.buffer_of(a_layout.buffer_id);
-            let b = engine.buffer_of(b_layout.buffer_id);
-            let (out, out_shape) = binary_broadcast_forward(
-                a,
-                &a_layout.shape,
-                &a_layout.strides,
-                a_layout.offset,
-                b,
-                &b_layout.shape,
-                &b_layout.strides,
-                b_layout.offset,
-                |x, y| x / y,
-            );
-            engine.create_from_op(out, out_shape, Op::Div, Parents::Binary(*self, *other))
-        })
+        binary_elementwise(self, other, Op::Div, |x, y| x / y)
     }
 
     pub fn exp(&self) -> Tensor {
-        with_engine(|engine| {
-            let layout = engine.layout_of_value(*self);
-            let a = engine.buffer_of(layout.buffer_id);
-            let mut out = vec![0.0; numel(&layout.shape)];
-            let mut out_i = 0usize;
-            for_each_index(&layout.shape, |coords| {
-                let i = layout.offset + offset_from_coords(coords, &layout.strides);
-                out[out_i] = a[i].exp();
-                out_i += 1;
-            });
-            engine.create_from_op(out, layout.shape, Op::Exp, Parents::Unary(*self))
-        })
+        unary_map(self, Op::Exp, f32::exp)
     }
 
     pub fn log(&self) -> Tensor {
-        with_engine(|engine| {
-            let layout = engine.layout_of_value(*self);
-            let a = engine.buffer_of(layout.buffer_id);
-            let mut out = vec![0.0; numel(&layout.shape)];
-            let mut out_i = 0usize;
-            for_each_index(&layout.shape, |coords| {
-                let i = layout.offset + offset_from_coords(coords, &layout.strides);
-                out[out_i] = a[i].ln();
-                out_i += 1;
-            });
-            engine.create_from_op(out, layout.shape, Op::Log, Parents::Unary(*self))
-        })
+        unary_map(self, Op::Log, f32::ln)
     }
 
     pub fn sum(&self, axis: usize, keepdim: bool) -> Tensor {
         with_engine(|engine| {
-            let layout = engine.layout_of_value(*self);
+            let layout = engine.layout_of(*self);
             let shape = layout.shape.clone();
             let out_shape = reduced_shape(&shape, axis, keepdim);
             let a = engine.buffer_of(layout.buffer_id);
@@ -330,7 +277,7 @@ impl Tensor {
 
     pub fn max(&self, axis: usize, keepdim: bool) -> Tensor {
         with_engine(|engine| {
-            let layout = engine.layout_of_value(*self);
+            let layout = engine.layout_of(*self);
             let shape = layout.shape.clone();
             let out_shape = reduced_shape(&shape, axis, keepdim);
             let out_strides = contiguous_strides(&out_shape);
@@ -360,24 +307,12 @@ impl Tensor {
     }
 
     pub fn relu(&self) -> Tensor {
-        with_engine(|engine| {
-            let layout = engine.layout_of_value(*self);
-            let x = engine.buffer_of(layout.buffer_id);
-            let mut out = vec![0.0; numel(&layout.shape)];
-            let mut out_i = 0usize;
-            for_each_index(&layout.shape, |coords| {
-                let i = layout.offset + offset_from_coords(coords, &layout.strides);
-                let v = x[i];
-                out[out_i] = if v > 0.0 { v } else { 0.0 };
-                out_i += 1;
-            });
-            engine.create_from_op(out, layout.shape, Op::Relu, Parents::Unary(*self))
-        })
+        unary_map(self, Op::Relu, |v| if v > 0.0 { v } else { 0.0 })
     }
 
     pub fn mean(&self) -> Tensor {
         with_engine(|engine| {
-            let layout = engine.layout_of_value(*self);
+            let layout = engine.layout_of(*self);
             let x = engine.buffer_of(layout.buffer_id);
             let n = numel(&layout.shape);
             assert!(n > 0, "mean requires non-empty tensor");

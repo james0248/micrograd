@@ -5,7 +5,7 @@ mod tensor;
 
 pub use tensor::Tensor;
 
-use std::sync::Mutex;
+use std::cell::RefCell;
 
 use engine::{ContextKind, Engine};
 
@@ -25,24 +25,12 @@ pub enum Op {
     Mean,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EngineStats {
-    pub param_count: usize,
-    pub temp_count: usize,
-    pub generation: u64,
-    pub context_depth: usize,
-    pub with_grad_active: bool,
-}
-
 thread_local! {
-    static ENGINE: Mutex<Engine> = Mutex::new(Engine::new());
+    static ENGINE: RefCell<Engine> = RefCell::new(Engine::new());
 }
 
 fn with_engine<R>(f: impl FnOnce(&mut Engine) -> R) -> R {
-    ENGINE.with(|engine| {
-        let mut guard = engine.lock().unwrap_or_else(|poison| poison.into_inner());
-        f(&mut guard)
-    })
+    ENGINE.with(|engine| f(&mut engine.borrow_mut()))
 }
 
 struct ContextGuard {
@@ -82,16 +70,6 @@ where
 
 pub fn clear_graph() {
     with_engine(|engine| engine.clear_graph());
-}
-
-pub fn stats() -> EngineStats {
-    with_engine(|engine| EngineStats {
-        param_count: engine.param_count(),
-        temp_count: engine.temp_count(),
-        generation: engine.active_generation(),
-        context_depth: engine.context_depth(),
-        with_grad_active: engine.is_with_grad_active(),
-    })
 }
 
 pub fn reset_state() {
