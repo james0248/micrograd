@@ -41,12 +41,7 @@ fn binary_broadcast_forward(
     (out, out_shape)
 }
 
-fn binary_elementwise(
-    a: &Tensor,
-    b: &Tensor,
-    op: Op,
-    f: impl Fn(f32, f32) -> f32,
-) -> Tensor {
+fn binary_elementwise(a: &Tensor, b: &Tensor, op: Op, f: impl Fn(f32, f32) -> f32) -> Tensor {
     with_engine(|engine| {
         let a_layout = engine.layout_of(*a);
         let b_layout = engine.layout_of(*b);

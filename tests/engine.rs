@@ -1,5 +1,5 @@
-use micrograd::engine::{Tensor, clear_graph, no_grad, reset_state, with_grad};
-use micrograd::losses::cross_entropy_with_logits;
+use tangent::engine::{Tensor, clear_graph, no_grad, reset_state, with_grad};
+use tangent::losses::cross_entropy_with_logits;
 
 fn assert_close(actual: f32, expected: f32, eps: f32) {
     assert!(

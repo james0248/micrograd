@@ -221,7 +221,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("time should be monotonic here");
         std::env::temp_dir().join(format!(
-            "micrograd_mnist_{tag}_{}_{}",
+            "tangent_mnist_{tag}_{}_{}",
             std::process::id(),
             now.as_nanos()
         ))

@@ -8,10 +8,10 @@ use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use serde::Serialize;
 
-use micrograd::engine::{Tensor, no_grad, reset_state, with_grad};
-use micrograd::losses::cross_entropy_with_logits;
-use micrograd::nn::Mlp;
-use micrograd::optim::{Optimizer, Sgd};
+use tangent::engine::{Tensor, no_grad, reset_state, with_grad};
+use tangent::losses::cross_entropy_with_logits;
+use tangent::nn::Mlp;
+use tangent::optim::{Optimizer, Sgd};
 
 fn tiny_dataset() -> Vec<([f32; 2], u8)> {
     vec![
@@ -49,7 +49,7 @@ fn temp_checkpoint_path(tag: &str) -> PathBuf {
         .expect("time should be monotonic here")
         .as_nanos();
     std::env::temp_dir().join(format!(
-        "micrograd_{tag}_{}_{}.ckpt",
+        "tangent_{tag}_{}_{}.ckpt",
         std::process::id(),
         nanos
     ))
