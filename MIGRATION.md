@@ -17,13 +17,13 @@ The legacy engine remains in the repository until the new autodiff path is valid
   - internal tracing via thread-local recorder state
   - interpreter-based execution
   - transpose-based reverse execution for the public `value_and_grad` path
-- Internal linearization and transpose-based pullback now exist beside the older direct-VJP baseline.
-- Regular primal trace mode still exists, but only as migration scaffolding for the current direct-VJP implementation.
+- Internal linearization and transpose-based pullback now define the full autodiff path.
+- Regular primal trace mode and the old direct-VJP baseline have been removed.
 - `Recorder` is currently the generic low-level `Trace` builder, while `JvpRecorder` is a linearization-specific wrapper that manages tangent inputs and residual capture on top of `Recorder`.
 - The public autodiff API is still:
   - `grad(f, inputs)`
   - `value_and_grad(f, inputs)`
-- The scalar-output restriction currently belongs to VJP, not tracing.
+- The scalar-output restriction currently belongs to the public `grad` / `value_and_grad` entrypoints, not tracing or linearization.
 - The current MVP op set is:
   - `add`
   - `sub`
@@ -52,13 +52,12 @@ The legacy engine remains in the repository until the new autodiff path is valid
 - Existing `grad` and `value_and_grad` stay unchanged during the first linearization step.
 - `MIGRATION.md` tracks autodiff migration only, not unrelated refactors.
 - Progress is tracked by stage sections instead of a chronological work log.
-- Direct VJP is the current implementation baseline.
 - Linearize plus transpose is the current architectural direction.
 - Linearized traces should capture forward-dependent coefficients as separate residuals, not as input-dependent trace constants.
-- Public `value_and_grad` should run through the transpose-based path, while direct VJP stays temporarily as a debug-only parity baseline.
+- Public `value_and_grad` should run through the transpose-based path.
 - `grad` should remain a thin wrapper over `value_and_grad` for now.
 - During validation, the new autodiff path should also be compared against the older tape-based engine on overlapping forward and gradient behavior.
-- Regular trace mode is temporary and will be removed or isolated after transpose-based VJP is validated.
+- Regular trace mode is not part of the target architecture and has been removed.
 - `Recorder` should remain as the generic low-level IR/trace builder. `JvpRecorder` should not replace it one-for-one; after migration it can stay as a linearization-specific wrapper or be renamed if a better name emerges.
 
 ## Progress
@@ -68,43 +67,41 @@ The legacy engine remains in the repository until the new autodiff path is valid
 - A side-by-side new autodiff path exists beside the legacy engine.
 - The new code is split into `tensor` and `autodiff` modules.
 - The test-only debug API has been removed.
-- Scalar-output validation has moved from tracing to VJP.
+- Scalar-output validation has moved from tracing to the public autodiff entrypoints.
 - Root integration tests and internal white-box tests are split cleanly.
 - Internal `linearize` exists.
 - Separate-residual linearization exists.
 - Internal transpose-based pullback exists.
 - Public `value_and_grad` is routed through the transpose-based path.
-- Debug builds run a direct-VJP parity check against the transpose-based path.
+- Direct VJP and regular primal tracing have been removed.
 - Integration tests compare the new autodiff API against the legacy tape-based engine on overlapping operations.
-- Internal and integration tests include randomized stress coverage against direct VJP, finite differences, and the legacy tape-based engine.
+- Integration tests include randomized stress coverage against finite differences and the legacy tape-based engine.
 
 ### Current
 
-- Validate and harden the public transpose-based reverse path against the preserved direct-VJP baseline.
-- Keep the new path aligned with the legacy tape-based engine on overlapping behaviors while direct VJP still exists.
+- Improve the new path itself rather than carrying migration scaffolding.
+- The immediate engine task is residual deduplication inside linearization and pullback construction.
 
 ### Next
 
-- Remove or isolate direct VJP after one more stabilization phase.
-- Remove regular primal trace scaffolding after direct VJP is retired.
+- Add residual deduplication once the new engine behavior is considered correct.
+- Revisit naming cleanup around `JvpRecorder` and other migration-era terms if they still feel temporary.
 
 ### Later
 
-- Add residual deduplication once the new engine behavior is considered correct.
 - Only after that, consider internal or public `vjp` and possible `grad(f)(inputs)`-style APIs.
 
 ## Immediate Plan
 
 - Reuse the existing `Trace`, `Recorder`, and interpreter infrastructure.
-- Keep the public autodiff API surface unchanged while validating the new implementation.
-- Validate transpose-based `value_and_grad` over the full current MVP op set against the direct-VJP baseline.
+- Keep the public autodiff API surface unchanged while improving the new implementation.
+- Validate transpose-based `value_and_grad` against the legacy tape-based engine and finite differences on the current MVP op set.
 - Keep `Recorder` as the shared low-level builder while the migration converges. Treat `JvpRecorder` as a higher-level linearization helper rather than the permanent replacement for `Recorder`.
-- Keep direct VJP and regular primal tracing for one more phase only.
+- Implement residual deduplication without changing the user-facing API.
 
 ## Open Questions
 
 - When, if ever, should `linearize` become a public API?
-- Should direct VJP remain after transpose-based VJP is validated, or only stay as a migration baseline?
 - Should `TensorSpec` remain as a shared metadata type, or be simplified later?
 - Should `JvpRecorder` keep its current name, or be renamed to something more architecture-neutral once the migration settles?
 - What should the post-stabilization public transform surface look like: keep only `grad/value_and_grad`, or add `vjp` before changing higher-level APIs?

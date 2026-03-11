@@ -1,7 +1,7 @@
 mod dense;
 mod traced;
 
-use crate::autodiff::{Operation, jvp_binary, jvp_unary, trace_binary, trace_unary};
+use crate::autodiff::{Operation, jvp_binary, jvp_unary};
 
 pub(crate) use dense::{DenseTensor, elementwise_binary, unary_map};
 pub(crate) use traced::{JvpTensor, TensorSpec, TracedTensor, ValueId};
@@ -10,7 +10,6 @@ pub(crate) use traced::{JvpTensor, TensorSpec, TracedTensor, ValueId};
 pub(crate) enum TensorInner {
     Concrete(DenseTensor),
     Jvp(JvpTensor),
-    Traced(TracedTensor),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -35,14 +34,13 @@ impl Tensor {
         match &self.inner {
             TensorInner::Concrete(tensor) => &tensor.shape,
             TensorInner::Jvp(tensor) => &tensor.primal.shape,
-            TensorInner::Traced(tensor) => &tensor.spec.shape,
         }
     }
 
     pub fn data(&self) -> &[f32] {
         match &self.inner {
             TensorInner::Concrete(tensor) => &tensor.data,
-            TensorInner::Jvp(_) | TensorInner::Traced(_) => {
+            TensorInner::Jvp(_) => {
                 panic!("tangent::tensor::Tensor::data() is unavailable while tracing")
             }
         }
@@ -50,9 +48,6 @@ impl Tensor {
 
     pub fn add(&self, other: &Tensor) -> Tensor {
         if let Some(out) = jvp_binary(self, other, Operation::Add) {
-            return out;
-        }
-        if let Some(out) = trace_binary(self, other, Operation::Add) {
             return out;
         }
         Tensor::from_concrete(elementwise_binary(
@@ -67,9 +62,6 @@ impl Tensor {
         if let Some(out) = jvp_binary(self, other, Operation::Sub) {
             return out;
         }
-        if let Some(out) = trace_binary(self, other, Operation::Sub) {
-            return out;
-        }
         Tensor::from_concrete(elementwise_binary(
             self.expect_concrete("sub"),
             other.expect_concrete("sub"),
@@ -80,9 +72,6 @@ impl Tensor {
 
     pub fn mul(&self, other: &Tensor) -> Tensor {
         if let Some(out) = jvp_binary(self, other, Operation::Mul) {
-            return out;
-        }
-        if let Some(out) = trace_binary(self, other, Operation::Mul) {
             return out;
         }
         Tensor::from_concrete(elementwise_binary(
@@ -97,9 +86,6 @@ impl Tensor {
         if let Some(out) = jvp_binary(self, other, Operation::Div) {
             return out;
         }
-        if let Some(out) = trace_binary(self, other, Operation::Div) {
-            return out;
-        }
         Tensor::from_concrete(elementwise_binary(
             self.expect_concrete("div"),
             other.expect_concrete("div"),
@@ -112,17 +98,11 @@ impl Tensor {
         if let Some(out) = jvp_unary(self, Operation::Exp) {
             return out;
         }
-        if let Some(out) = trace_unary(self, Operation::Exp) {
-            return out;
-        }
         Tensor::from_concrete(unary_map(self.expect_concrete("exp"), |x| x.exp()))
     }
 
     pub fn log(&self) -> Tensor {
         if let Some(out) = jvp_unary(self, Operation::Log) {
-            return out;
-        }
-        if let Some(out) = trace_unary(self, Operation::Log) {
             return out;
         }
         Tensor::from_concrete(unary_map(self.expect_concrete("log"), |x| x.ln()))
@@ -132,9 +112,6 @@ impl Tensor {
         if let Some(out) = jvp_unary(self, Operation::SumAll) {
             return out;
         }
-        if let Some(out) = trace_unary(self, Operation::SumAll) {
-            return out;
-        }
         let tensor = self.expect_concrete("sum_all");
         let sum = tensor.data.iter().copied().sum();
         Tensor::from_vec(vec![sum], vec![1])
@@ -142,9 +119,6 @@ impl Tensor {
 
     pub fn mean_all(&self) -> Tensor {
         if let Some(out) = jvp_unary(self, Operation::MeanAll) {
-            return out;
-        }
-        if let Some(out) = trace_unary(self, Operation::MeanAll) {
             return out;
         }
         let tensor = self.expect_concrete("mean_all");
@@ -164,16 +138,10 @@ impl Tensor {
         }
     }
 
-    pub(crate) fn from_traced(var: ValueId, spec: TensorSpec) -> Self {
-        Self {
-            inner: TensorInner::Traced(TracedTensor { var, spec }),
-        }
-    }
-
     pub(crate) fn expect_concrete(&self, op_name: &str) -> &DenseTensor {
         match &self.inner {
             TensorInner::Concrete(tensor) => tensor,
-            TensorInner::Jvp(_) | TensorInner::Traced(_) => {
+            TensorInner::Jvp(_) => {
                 panic!(
                     "tangent::tensor::Tensor::{op_name} cannot execute eagerly on a traced tensor"
                 )
@@ -183,15 +151,8 @@ impl Tensor {
 
     pub(crate) fn as_jvp(&self) -> Option<&JvpTensor> {
         match &self.inner {
-            TensorInner::Concrete(_) | TensorInner::Traced(_) => None,
+            TensorInner::Concrete(_) => None,
             TensorInner::Jvp(tensor) => Some(tensor),
-        }
-    }
-
-    pub(crate) fn as_traced(&self) -> Option<&TracedTensor> {
-        match &self.inner {
-            TensorInner::Concrete(_) | TensorInner::Jvp(_) => None,
-            TensorInner::Traced(tensor) => Some(tensor),
         }
     }
 }

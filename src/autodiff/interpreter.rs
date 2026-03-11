@@ -126,7 +126,7 @@ pub(crate) fn concrete_inputs(inputs: &[Tensor]) -> Vec<DenseTensor> {
         .iter()
         .map(|tensor| match &tensor.inner {
             TensorInner::Concrete(value) => value.clone(),
-            TensorInner::Jvp(_) | TensorInner::Traced(_) => {
+            TensorInner::Jvp(_) => {
                 panic!("autodiff inputs must be concrete tensors")
             }
         })

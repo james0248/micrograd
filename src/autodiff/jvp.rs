@@ -271,9 +271,6 @@ impl JvpRecorder {
                     .add_const_tensor(DenseTensor::zeros(output_spec.shape.clone()));
                 (primal, zero, output_spec)
             }
-            TensorInner::Traced(_) => {
-                panic!("linearize output must not be a regular traced tensor")
-            }
         };
 
         let linearized = Linearized {
@@ -300,9 +297,6 @@ fn jvp_operand(recorder: &mut JvpRecorder, tensor: &Tensor) -> JvpOperand {
             primal: jvp.primal.clone(),
             tangent: jvp.tangent.clone(),
         },
-        TensorInner::Traced(_) => {
-            panic!("JVP tracing does not support regular traced tensors as operands")
-        }
     }
 }
 
