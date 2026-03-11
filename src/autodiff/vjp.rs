@@ -1,9 +1,7 @@
-use std::collections::HashMap;
-
-use crate::tensor::{DenseTensor, TensorSpec, ValueId};
+use crate::tensor::{DenseTensor, ValueId};
 
 use super::ir::{Operation, Trace, build_spec_table};
-use super::trace::Recorder;
+use super::trace::{Recorder, accumulate_cotangent, negate_value};
 
 pub(crate) fn build_vjp(forward: &Trace) -> Trace {
     let specs = build_spec_table(forward);
@@ -21,12 +19,12 @@ pub(crate) fn build_vjp(forward: &Trace) -> Trace {
     );
 
     let mut recorder = Recorder::from_trace(forward);
-    let mut cotangents: HashMap<ValueId, ValueId> = HashMap::new();
+    let mut cotangents: Vec<Option<ValueId>> = vec![None; forward.next_var];
     let seed = recorder.add_const_tensor(DenseTensor::filled(output_spec.shape.clone(), 1.0));
-    cotangents.insert(output, seed);
+    cotangents[output] = Some(seed);
 
     for instruction in forward.instructions.iter().rev() {
-        let Some(out_ct) = cotangents.get(&instruction.out).copied() else {
+        let Some(out_ct) = cotangents[instruction.out] else {
             continue;
         };
 
@@ -253,35 +251,11 @@ pub(crate) fn build_vjp(forward: &Trace) -> Trace {
         .inputs
         .iter()
         .map(|input| {
-            cotangents.get(&input.var).copied().unwrap_or_else(|| {
+            cotangents[input.var].unwrap_or_else(|| {
                 recorder.add_const_tensor(DenseTensor::zeros(input.spec.shape.clone()))
             })
         })
         .collect();
 
     recorder.into_trace(outputs)
-}
-
-fn accumulate_cotangent(
-    recorder: &mut Recorder,
-    cotangents: &mut HashMap<ValueId, ValueId>,
-    target: ValueId,
-    contrib: ValueId,
-    spec: &TensorSpec,
-) {
-    if let Some(existing) = cotangents.get(&target).copied() {
-        let sum = recorder
-            .add_instruction(Operation::Add, vec![existing, contrib], spec.clone())
-            .var;
-        cotangents.insert(target, sum);
-    } else {
-        cotangents.insert(target, contrib);
-    }
-}
-
-fn negate_value(recorder: &mut Recorder, input: ValueId, spec: &TensorSpec) -> ValueId {
-    let minus_one = recorder.add_const_tensor(DenseTensor::filled(spec.shape.clone(), -1.0));
-    recorder
-        .add_instruction(Operation::Mul, vec![input, minus_one], spec.clone())
-        .var
 }

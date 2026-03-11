@@ -1,7 +1,8 @@
 use std::cell::RefCell;
 
 use crate::tensor::{
-    DenseTensor, Tensor, TensorInner, TensorSpec, TracedTensor, elementwise_binary, unary_map,
+    DenseTensor, Tensor, TensorInner, TensorSpec, TracedTensor, ValueId, elementwise_binary,
+    unary_map,
 };
 
 use super::Operation;
@@ -10,15 +11,16 @@ use super::ir::Trace;
 use super::trace::Recorder;
 
 thread_local! {
-    static JVP_STACK: RefCell<Vec<Recorder>> = const { RefCell::new(Vec::new()) };
+    static JVP_STACK: RefCell<Vec<JvpRecorder>> = const { RefCell::new(Vec::new()) };
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone)]
 pub(crate) struct Linearized {
-    tangent_trace: Trace,
-    input_specs: Vec<TensorSpec>,
-    output_spec: TensorSpec,
+    pub(crate) trace: Trace,
+    pub(crate) tangent_input_specs: Vec<TensorSpec>,
+    pub(crate) residuals: Vec<DenseTensor>,
+    pub(crate) output_spec: TensorSpec,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -26,12 +28,12 @@ impl Linearized {
     pub(crate) fn apply_dense(&self, tangents: &[DenseTensor]) -> DenseTensor {
         assert_eq!(
             tangents.len(),
-            self.input_specs.len(),
+            self.tangent_input_specs.len(),
             "linearized tangent input count mismatch: expected {}, got {}",
-            self.input_specs.len(),
+            self.tangent_input_specs.len(),
             tangents.len()
         );
-        for (input, spec) in tangents.iter().zip(self.input_specs.iter()) {
+        for (input, spec) in tangents.iter().zip(self.tangent_input_specs.iter()) {
             assert_eq!(
                 input.shape, spec.shape,
                 "linearized tangent input shape mismatch: expected {:?}, got {:?}",
@@ -39,7 +41,10 @@ impl Linearized {
             );
         }
 
-        let output = execute_trace(&self.tangent_trace, tangents)
+        let mut inputs = tangents.to_vec();
+        inputs.extend(self.residuals.iter().cloned());
+
+        let output = execute_trace(&self.trace, &inputs)
             .into_iter()
             .next()
             .expect("linearized tangent trace must produce exactly one output");
@@ -57,37 +62,9 @@ pub(crate) fn linearize<F>(f: F, primals: &[DenseTensor]) -> (DenseTensor, Linea
 where
     F: Fn(&[Tensor]) -> Tensor,
 {
-    let mut recorder = Recorder::new_empty();
-    let mut jvp_inputs = Vec::with_capacity(primals.len());
-    let mut input_specs = Vec::with_capacity(primals.len());
-
-    for primal in primals {
-        let spec = primal.spec();
-        let tangent = recorder.add_input(spec.clone());
-        input_specs.push(spec.clone());
-        jvp_inputs.push(Tensor::from_jvp(primal.clone(), tangent));
-    }
-
-    let (mut recorder, output) = with_jvp_scope(recorder, || f(&jvp_inputs));
-    let (output_primal, output_tangent, output_spec) = match output.inner {
-        TensorInner::Jvp(jvp) => {
-            let output_spec = jvp.primal.spec();
-            (jvp.primal, jvp.tangent.var, output_spec)
-        }
-        TensorInner::Concrete(primal) => {
-            let output_spec = primal.spec();
-            let zero = recorder.add_const_tensor(DenseTensor::zeros(output_spec.shape.clone()));
-            (primal, zero, output_spec)
-        }
-        TensorInner::Traced(_) => panic!("linearize output must not be a regular traced tensor"),
-    };
-
-    let linearized = Linearized {
-        tangent_trace: recorder.into_trace(vec![output_tangent]),
-        input_specs,
-        output_spec: output_spec.clone(),
-    };
-    (output_primal, linearized)
+    let (recorder, jvp_inputs) = JvpRecorder::new(primals);
+    let (recorder, output) = with_jvp_scope(recorder, || f(&jvp_inputs));
+    recorder.into_linearized(output)
 }
 
 pub(crate) fn jvp_binary(lhs: &Tensor, rhs: &Tensor, op: Operation) -> Option<Tensor> {
@@ -120,19 +97,19 @@ pub(crate) fn jvp_binary(lhs: &Tensor, rhs: &Tensor, op: Operation) -> Option<Te
                     .var
             }
             Operation::Mul => {
-                let lhs_const = recorder.add_const_tensor(lhs.primal.clone());
-                let rhs_const = recorder.add_const_tensor(rhs.primal.clone());
+                let lhs_residual = recorder.add_residual(lhs.primal.clone()).var;
+                let rhs_residual = recorder.add_residual(rhs.primal.clone()).var;
                 let lhs_term = recorder
                     .add_instruction(
                         Operation::Mul,
-                        vec![lhs.tangent.var, rhs_const],
+                        vec![lhs.tangent.var, rhs_residual],
                         spec.clone(),
                     )
                     .var;
                 let rhs_term = recorder
                     .add_instruction(
                         Operation::Mul,
-                        vec![lhs_const, rhs.tangent.var],
+                        vec![lhs_residual, rhs.tangent.var],
                         spec.clone(),
                     )
                     .var;
@@ -141,30 +118,29 @@ pub(crate) fn jvp_binary(lhs: &Tensor, rhs: &Tensor, op: Operation) -> Option<Te
                     .var
             }
             Operation::Div => {
-                let lhs_const = recorder.add_const_tensor(lhs.primal.clone());
-                let rhs_const = recorder.add_const_tensor(rhs.primal.clone());
+                let lhs_coeff = unary_map(&rhs.primal, |x| 1.0 / x);
+                let rhs_coeff =
+                    elementwise_binary(&lhs.primal, &rhs.primal, "div_rhs_coeff", |x, y| {
+                        -x / (y * y)
+                    });
+                let lhs_residual = recorder.add_residual(lhs_coeff).var;
+                let rhs_residual = recorder.add_residual(rhs_coeff).var;
                 let lhs_term = recorder
                     .add_instruction(
                         Operation::Mul,
-                        vec![lhs.tangent.var, rhs_const],
+                        vec![lhs.tangent.var, lhs_residual],
                         spec.clone(),
                     )
                     .var;
                 let rhs_term = recorder
                     .add_instruction(
                         Operation::Mul,
-                        vec![lhs_const, rhs.tangent.var],
+                        vec![rhs.tangent.var, rhs_residual],
                         spec.clone(),
                     )
                     .var;
-                let numerator = recorder
-                    .add_instruction(Operation::Sub, vec![lhs_term, rhs_term], spec.clone())
-                    .var;
-                let denominator = recorder
-                    .add_instruction(Operation::Mul, vec![rhs_const, rhs_const], spec.clone())
-                    .var;
                 recorder
-                    .add_instruction(Operation::Div, vec![numerator, denominator], spec.clone())
+                    .add_instruction(Operation::Add, vec![lhs_term, rhs_term], spec.clone())
                     .var
             }
             _ => panic!("jvp_binary does not support operation {:?}", op),
@@ -186,21 +162,23 @@ pub(crate) fn jvp_unary(input: &Tensor, op: Operation) -> Option<Tensor> {
         let spec = primal.spec();
         let tangent = match op {
             Operation::Exp => {
-                let primal_const = recorder.add_const_tensor(primal.clone());
+                let primal_residual = recorder.add_residual(primal.clone()).var;
                 recorder
                     .add_instruction(
                         Operation::Mul,
-                        vec![primal_const, jvp.tangent.var],
+                        vec![jvp.tangent.var, primal_residual],
                         spec.clone(),
                     )
                     .var
             }
             Operation::Log => {
-                let input_const = recorder.add_const_tensor(jvp.primal.clone());
+                let reciprocal = recorder
+                    .add_residual(unary_map(&jvp.primal, |x| 1.0 / x))
+                    .var;
                 recorder
                     .add_instruction(
-                        Operation::Div,
-                        vec![jvp.tangent.var, input_const],
+                        Operation::Mul,
+                        vec![jvp.tangent.var, reciprocal],
                         spec.clone(),
                     )
                     .var
@@ -230,7 +208,85 @@ struct JvpOperand {
     tangent: TracedTensor,
 }
 
-fn jvp_operand(recorder: &mut Recorder, tensor: &Tensor) -> JvpOperand {
+#[derive(Debug, Clone)]
+struct JvpRecorder {
+    recorder: Recorder,
+    tangent_input_specs: Vec<TensorSpec>,
+    residuals: Vec<DenseTensor>,
+}
+
+impl JvpRecorder {
+    fn new(primals: &[DenseTensor]) -> (Self, Vec<Tensor>) {
+        let mut recorder = Recorder::new_empty();
+        let mut jvp_inputs = Vec::with_capacity(primals.len());
+        let mut tangent_input_specs = Vec::with_capacity(primals.len());
+
+        for primal in primals {
+            let spec = primal.spec();
+            let tangent = recorder.add_input(spec.clone());
+            tangent_input_specs.push(spec.clone());
+            jvp_inputs.push(Tensor::from_jvp(primal.clone(), tangent));
+        }
+
+        (
+            Self {
+                recorder,
+                tangent_input_specs,
+                residuals: Vec::new(),
+            },
+            jvp_inputs,
+        )
+    }
+
+    fn add_residual(&mut self, tensor: DenseTensor) -> TracedTensor {
+        let spec = tensor.spec();
+        let residual = self.recorder.add_input(spec.clone());
+        self.residuals.push(tensor);
+        residual
+    }
+
+    fn add_const_tensor(&mut self, tensor: DenseTensor) -> ValueId {
+        self.recorder.add_const_tensor(tensor)
+    }
+
+    fn add_instruction(
+        &mut self,
+        op: Operation,
+        inputs: Vec<ValueId>,
+        spec: TensorSpec,
+    ) -> TracedTensor {
+        self.recorder.add_instruction(op, inputs, spec)
+    }
+
+    fn into_linearized(mut self, output: Tensor) -> (DenseTensor, Linearized) {
+        let (output_primal, output_tangent, output_spec) = match output.inner {
+            TensorInner::Jvp(jvp) => {
+                let output_spec = jvp.primal.spec();
+                (jvp.primal, jvp.tangent.var, output_spec)
+            }
+            TensorInner::Concrete(primal) => {
+                let output_spec = primal.spec();
+                let zero = self
+                    .recorder
+                    .add_const_tensor(DenseTensor::zeros(output_spec.shape.clone()));
+                (primal, zero, output_spec)
+            }
+            TensorInner::Traced(_) => {
+                panic!("linearize output must not be a regular traced tensor")
+            }
+        };
+
+        let linearized = Linearized {
+            trace: self.recorder.into_trace(vec![output_tangent]),
+            tangent_input_specs: self.tangent_input_specs,
+            residuals: self.residuals,
+            output_spec: output_spec.clone(),
+        };
+        (output_primal, linearized)
+    }
+}
+
+fn jvp_operand(recorder: &mut JvpRecorder, tensor: &Tensor) -> JvpOperand {
     match &tensor.inner {
         TensorInner::Concrete(primal) => {
             let spec = primal.spec();
@@ -273,7 +329,7 @@ fn eager_unary(op: &Operation, input: &DenseTensor) -> DenseTensor {
     }
 }
 
-fn with_jvp_recorder<R>(f: impl FnOnce(&mut Recorder) -> R) -> Option<R> {
+fn with_jvp_recorder<R>(f: impl FnOnce(&mut JvpRecorder) -> R) -> Option<R> {
     JVP_STACK.with(|stack| {
         let mut stack = stack.borrow_mut();
         let recorder = stack.last_mut()?;
@@ -282,12 +338,12 @@ fn with_jvp_recorder<R>(f: impl FnOnce(&mut Recorder) -> R) -> Option<R> {
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-fn push_jvp_recorder(recorder: Recorder) {
+fn push_jvp_recorder(recorder: JvpRecorder) {
     JVP_STACK.with(|stack| stack.borrow_mut().push(recorder));
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-fn pop_jvp_recorder() -> Recorder {
+fn pop_jvp_recorder() -> JvpRecorder {
     JVP_STACK.with(|stack| {
         stack
             .borrow_mut()
@@ -304,7 +360,7 @@ fn clear_jvp_recorder_on_unwind() {
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-fn with_jvp_scope<F, T>(recorder: Recorder, f: F) -> (Recorder, T)
+fn with_jvp_scope<F, T>(recorder: JvpRecorder, f: F) -> (JvpRecorder, T)
 where
     F: FnOnce() -> T,
 {

@@ -205,6 +205,30 @@ where
     (recorder, out)
 }
 
+pub(super) fn accumulate_cotangent(
+    recorder: &mut Recorder,
+    cotangents: &mut [Option<ValueId>],
+    target: ValueId,
+    contrib: ValueId,
+    spec: &TensorSpec,
+) {
+    if let Some(existing) = cotangents[target] {
+        let sum = recorder
+            .add_instruction(Operation::Add, vec![existing, contrib], spec.clone())
+            .var;
+        cotangents[target] = Some(sum);
+    } else {
+        cotangents[target] = Some(contrib);
+    }
+}
+
+pub(super) fn negate_value(recorder: &mut Recorder, input: ValueId, spec: &TensorSpec) -> ValueId {
+    let minus_one = recorder.add_const_tensor(DenseTensor::filled(spec.shape.clone(), -1.0));
+    recorder
+        .add_instruction(Operation::Mul, vec![input, minus_one], spec.clone())
+        .var
+}
+
 fn abstract_eval_binary(op: &Operation, lhs: &TensorSpec, rhs: &TensorSpec) -> TensorSpec {
     assert!(
         matches!(
