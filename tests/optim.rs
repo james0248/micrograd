@@ -1,5 +1,5 @@
-use micrograd::engine::{Tensor, reset_state};
-use micrograd::optim::{Optimizer, Sgd};
+use tangent::engine::{Tensor, reset_state};
+use tangent::optim::{Optimizer, Sgd};
 
 #[test]
 fn sgd_step_updates_parameter_data() {
