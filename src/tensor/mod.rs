@@ -4,7 +4,8 @@ mod traced;
 use crate::autodiff::{Operation, jvp_binary, jvp_unary};
 
 pub(crate) use dense::{
-    DenseTensor, elementwise_binary, matmul, max_axis, mean_all, relu, sum_all, sum_axis, unary_map,
+    DenseTensor, elementwise_binary, expand_to_shape, matmul, matmul_shape, max_axis,
+    max_axis_weights, mean_all, relu, sum_all, sum_axis, sum_to_shape, unary_map,
 };
 pub(crate) use traced::{JvpTensor, TensorSpec, TracedTensor, ValueId};
 
@@ -49,7 +50,6 @@ impl Tensor {
     }
 
     pub fn add(&self, other: &Tensor) -> Tensor {
-        self.assert_broadcast_autodiff_supported(other, "add");
         if let Some(out) = jvp_binary(self, other, Operation::Add) {
             return out;
         }
@@ -61,7 +61,6 @@ impl Tensor {
     }
 
     pub fn sub(&self, other: &Tensor) -> Tensor {
-        self.assert_broadcast_autodiff_supported(other, "sub");
         if let Some(out) = jvp_binary(self, other, Operation::Sub) {
             return out;
         }
@@ -73,7 +72,6 @@ impl Tensor {
     }
 
     pub fn mul(&self, other: &Tensor) -> Tensor {
-        self.assert_broadcast_autodiff_supported(other, "mul");
         if let Some(out) = jvp_binary(self, other, Operation::Mul) {
             return out;
         }
@@ -85,7 +83,6 @@ impl Tensor {
     }
 
     pub fn div(&self, other: &Tensor) -> Tensor {
-        self.assert_broadcast_autodiff_supported(other, "div");
         if let Some(out) = jvp_binary(self, other, Operation::Div) {
             return out;
         }
@@ -111,22 +108,30 @@ impl Tensor {
     }
 
     pub fn relu(&self) -> Tensor {
-        self.assert_autodiff_op_unavailable("relu");
+        if let Some(out) = jvp_unary(self, Operation::Relu) {
+            return out;
+        }
         Tensor::from_concrete(relu(self.expect_concrete("relu")))
     }
 
     pub fn sum(&self, axis: usize, keepdim: bool) -> Tensor {
-        self.assert_autodiff_op_unavailable("sum");
+        if let Some(out) = jvp_unary(self, Operation::Sum { axis, keepdim }) {
+            return out;
+        }
         Tensor::from_concrete(sum_axis(self.expect_concrete("sum"), axis, keepdim))
     }
 
     pub fn max(&self, axis: usize, keepdim: bool) -> Tensor {
-        self.assert_autodiff_op_unavailable("max");
+        if let Some(out) = jvp_unary(self, Operation::Max { axis, keepdim }) {
+            return out;
+        }
         Tensor::from_concrete(max_axis(self.expect_concrete("max"), axis, keepdim))
     }
 
     pub fn matmul(&self, other: &Tensor) -> Tensor {
-        self.assert_binary_autodiff_op_unavailable(other, "matmul");
+        if let Some(out) = jvp_binary(self, other, Operation::MatMul) {
+            return out;
+        }
         Tensor::from_concrete(matmul(
             self.expect_concrete("matmul"),
             other.expect_concrete("matmul"),
@@ -181,24 +186,6 @@ impl Tensor {
         match &self.inner {
             TensorInner::Concrete(_) => None,
             TensorInner::Jvp(tensor) => Some(tensor),
-        }
-    }
-
-    fn assert_broadcast_autodiff_supported(&self, other: &Tensor, op_name: &str) {
-        if (self.as_jvp().is_some() || other.as_jvp().is_some()) && self.shape() != other.shape() {
-            panic!("autodiff does not support broadcasted {op_name} yet");
-        }
-    }
-
-    fn assert_autodiff_op_unavailable(&self, op_name: &str) {
-        if self.as_jvp().is_some() {
-            panic!("autodiff does not support {op_name} yet");
-        }
-    }
-
-    fn assert_binary_autodiff_op_unavailable(&self, other: &Tensor, op_name: &str) {
-        if self.as_jvp().is_some() || other.as_jvp().is_some() {
-            panic!("autodiff does not support {op_name} yet");
         }
     }
 }

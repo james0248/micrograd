@@ -348,68 +348,89 @@ fn nonscalar_output_panics_with_explicit_error() {
 }
 
 #[test]
-fn autodiff_rejects_broadcasted_add_until_broadcast_gradients_exist() {
-    let result = std::panic::catch_unwind(|| {
-        let _ = autodiff::value_and_grad(
-            |xs| xs[0].add(&xs[1]).sum_all(),
-            &[
-                Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]),
-                Tensor::from_vec(vec![10.0, 20.0], vec![2]),
-            ],
-        );
-    });
-    let msg = panic_message(result.expect_err("expected broadcast autodiff panic"));
-    assert!(msg.contains("autodiff does not support broadcasted add yet"));
+fn autodiff_broadcasted_add_matches_expected_gradients() {
+    let (value, grads) = autodiff::value_and_grad(
+        |xs| xs[0].add(&xs[1]).sum_all(),
+        &[
+            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]),
+            Tensor::from_vec(vec![10.0, 20.0], vec![2]),
+        ],
+    );
+
+    assert_vec_close(&value.to_vec(), &[70.0], 1e-6);
+    assert_vec_close(&grads[0].to_vec(), &[1.0, 1.0, 1.0, 1.0], 1e-6);
+    assert_vec_close(&grads[1].to_vec(), &[2.0, 2.0], 1e-6);
 }
 
 #[test]
-fn autodiff_rejects_stage2_forward_ops_until_stage4() {
-    let relu = std::panic::catch_unwind(|| {
-        let _ = autodiff::value_and_grad(
-            |xs| xs[0].relu().sum_all(),
-            &[Tensor::from_vec(vec![-1.0, 2.0], vec![2])],
-        );
-    });
-    assert!(
-        panic_message(relu.expect_err("expected relu autodiff panic"))
-            .contains("autodiff does not support relu yet")
+fn autodiff_stage4_batched_ops_match_legacy_engine() {
+    let (relu_value, relu_grads) = autodiff::value_and_grad(
+        |xs| xs[0].relu().sum_all(),
+        &[Tensor::from_vec(vec![-1.0, 2.0], vec![2])],
+    );
+    let (legacy_relu_value, legacy_relu_grads) =
+        legacy_value_and_grad(&[(&[-1.0, 2.0], &[2])], |xs| legacy_sum_all(xs[0].relu()));
+    assert_vec_close(&relu_value.to_vec(), &legacy_relu_value, 1e-6);
+    assert_vec_close(&relu_grads[0].to_vec(), &legacy_relu_grads[0], 1e-6);
+
+    let (sum_value, sum_grads) = autodiff::value_and_grad(
+        |xs| xs[0].sum(1, false).sum_all(),
+        &[Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2])],
+    );
+    let (legacy_sum_value, legacy_sum_grads) =
+        legacy_value_and_grad(&[(&[1.0, 2.0, 3.0, 4.0], &[2, 2])], |xs| {
+            legacy_sum_all(xs[0].sum(1, false))
+        });
+    assert_vec_close(&sum_value.to_vec(), &legacy_sum_value, 1e-6);
+    assert_vec_close(&sum_grads[0].to_vec(), &legacy_sum_grads[0], 1e-6);
+
+    let (max_value, max_grads) = autodiff::value_and_grad(
+        |xs| xs[0].max(1, false).sum_all(),
+        &[Tensor::from_vec(vec![2.0, 2.0, 1.0], vec![1, 3])],
+    );
+    let (legacy_max_value, legacy_max_grads) =
+        legacy_value_and_grad(&[(&[2.0, 2.0, 1.0], &[1, 3])], |xs| {
+            legacy_sum_all(xs[0].max(1, false))
+        });
+    assert_vec_close(&max_value.to_vec(), &legacy_max_value, 1e-6);
+    assert_vec_close(&max_grads[0].to_vec(), &legacy_max_grads[0], 1e-6);
+
+    let (matmul_value, matmul_grads) = autodiff::value_and_grad(
+        |xs| xs[0].matmul(&xs[1]).sum_all(),
+        &[
+            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]),
+            Tensor::from_vec(vec![5.0, 6.0, 7.0, 8.0], vec![2, 2]),
+        ],
+    );
+    let (legacy_matmul_value, legacy_matmul_grads) = legacy_value_and_grad(
+        &[
+            (&[1.0, 2.0, 3.0, 4.0], &[2, 2]),
+            (&[5.0, 6.0, 7.0, 8.0], &[2, 2]),
+        ],
+        |xs| legacy_sum_all(xs[0].matmul(&xs[1])),
+    );
+    assert_vec_close(&matmul_value.to_vec(), &legacy_matmul_value, 1e-6);
+    assert_vec_close(&matmul_grads[0].to_vec(), &legacy_matmul_grads[0], 1e-6);
+    assert_vec_close(&matmul_grads[1].to_vec(), &legacy_matmul_grads[1], 1e-6);
+}
+
+#[test]
+fn autodiff_batched_matmul_broadcast_matches_legacy_engine() {
+    let (value, grads) = autodiff::value_and_grad(
+        |xs| xs[0].matmul(&xs[1]).mean_all(),
+        &[
+            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 1, 2]),
+            Tensor::from_vec(vec![5.0, 6.0], vec![2, 1]),
+        ],
+    );
+    let (legacy_value, legacy_grads) = legacy_value_and_grad(
+        &[(&[1.0, 2.0, 3.0, 4.0], &[2, 1, 2]), (&[5.0, 6.0], &[2, 1])],
+        |xs| xs[0].matmul(&xs[1]).mean(),
     );
 
-    let sum = std::panic::catch_unwind(|| {
-        let _ = autodiff::value_and_grad(
-            |xs| xs[0].sum(1, false).sum_all(),
-            &[Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2])],
-        );
-    });
-    assert!(
-        panic_message(sum.expect_err("expected sum autodiff panic"))
-            .contains("autodiff does not support sum yet")
-    );
-
-    let max = std::panic::catch_unwind(|| {
-        let _ = autodiff::value_and_grad(
-            |xs| xs[0].max(1, false).sum_all(),
-            &[Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2])],
-        );
-    });
-    assert!(
-        panic_message(max.expect_err("expected max autodiff panic"))
-            .contains("autodiff does not support max yet")
-    );
-
-    let matmul = std::panic::catch_unwind(|| {
-        let _ = autodiff::value_and_grad(
-            |xs| xs[0].matmul(&xs[1]).sum_all(),
-            &[
-                Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]),
-                Tensor::from_vec(vec![5.0, 6.0, 7.0, 8.0], vec![2, 2]),
-            ],
-        );
-    });
-    assert!(
-        panic_message(matmul.expect_err("expected matmul autodiff panic"))
-            .contains("autodiff does not support matmul yet")
-    );
+    assert_vec_close(&value.to_vec(), &legacy_value, 1e-6);
+    assert_vec_close(&grads[0].to_vec(), &legacy_grads[0], 1e-6);
+    assert_vec_close(&grads[1].to_vec(), &legacy_grads[1], 1e-6);
 }
 
 #[test]

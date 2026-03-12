@@ -42,7 +42,21 @@ The legacy engine remains in the repository until the new autodiff path is valid
   - `matmul`
 - The new tensor path now uses dense backing storage with generic strided layouts for view semantics.
 - Public tensor inspection on the new path is explicit materialization via `to_vec()`.
-- The current training stack (`nn`, `losses`, `optim`, `mnist`) still depends on the legacy engine because the new path does not yet support the batched op set that training requires.
+- The batched op set is now representable and executable in the new `Trace` IR and interpreter.
+- `linearize` now records the full current batched training subset:
+  - broadcasted elementwise `add` / `sub` / `mul` / `div`
+  - `sum(axis, keepdim)`
+  - `max(axis, keepdim)`
+  - `relu`
+  - `matmul`
+- Public autodiff now supports the full current batched op set needed by the training path:
+  - broadcasted elementwise `add` / `sub` / `mul` / `div`
+  - `sum(axis, keepdim)`
+  - `max(axis, keepdim)`
+  - `relu`
+  - `matmul`
+- `max(axis, keepdim)` now uses evenly split tie gradients, matching the legacy engine.
+- The current training stack (`nn`, `losses`, `optim`, `mnist`) still depends on the legacy engine because it has not yet been migrated onto the new path.
 - General `sum(axes, keepdim)` and `mean(axes, keepdim)` are part of the long-term direction; the current `sum_all` / `mean_all` API is still transitional.
 
 ## Desired State
@@ -88,10 +102,11 @@ The legacy engine remains in the repository until the new autodiff path is valid
   - shape inference and the interpreter handle broadcast semantics from operand shapes
   - explicit helper ops such as `BroadcastTo` can be added later only if backward needs them
 - Stage 3 reductions should use single-axis operations with `axis: usize` and `keepdim: bool`, matching the legacy engine.
-- Stage 3 should trace and interpret the expanded batched op set, but autodiff should still fail fast on those ops until Stage 4 rules exist.
-- Stage 3 `max` work is forward-only; tie-gradient policy remains a Stage 4 concern.
+- Stage 3 should trace and interpret the expanded batched op set through `linearize` where the local linearization rule is already settled, but public autodiff should still fail fast on those ops until Stage 4 transpose rules exist.
+- Stage 3 `max` work is forward-only and stays out of `linearize`; tie-gradient policy remains a Stage 4 concern.
 - Stage 3 `matmul` should use full legacy semantics immediately: rank `>= 2`, inner-dimension match, and batch-dimension broadcasting.
 - General `sum(axes, keepdim)` and `mean(axes, keepdim)` should replace `sum_all` / `mean_all` later; Stage 3 does not add them yet.
+- Stage 4 `max(axis, keepdim)` should split tie gradients evenly, matching the legacy engine and value-only `amax`-style semantics.
 - Batched training support should be implemented in stages:
   - layout and view foundation
   - eager batched ops
@@ -137,23 +152,29 @@ The legacy engine remains in the repository until the new autodiff path is valid
   - `relu`
   - `matmul`
   - compute ops return contiguous outputs while `transpose` remains a view
-  - autodiff explicitly rejects the new Stage 2 ops until Stage 4 adds the correct rules
+  - this forward surface is now fully covered by Stage 4 autodiff
+- Stage 3 IR/interpreter expansion is complete:
+  - `Trace` and the interpreter now support `sum(axis, keepdim)`, `max(axis, keepdim)`, `relu`, and `matmul`
+  - broadcasting remains implicit in IR for `add` / `sub` / `mul` / `div`
+  - `linearize` now records broadcasted binaries, `sum(axis, keepdim)`, `relu`, and `matmul`
+  - this IR/interpreter expansion is now exercised end-to-end by Stage 4 autodiff
+- Stage 4 autodiff expansion is complete:
+  - broadcasted `add` / `sub` now reduce pullback cotangents with `SumToShape`
+  - broadcasted `mul` / `div` now use coefficient residuals plus `SumToShape`
+  - `sum(axis, keepdim)` now pulls back through `ExpandToShape`
+  - `relu` now differentiates through captured derivative masks
+  - `matmul` now differentiates with full legacy batch-broadcast semantics
+  - `max(axis, keepdim)` now linearizes through tie-weight residuals and splits ties evenly
+  - public `value_and_grad` and `grad` now work across the full current batched op set
 
 ### Current
 
-- Stage 3: add IR and interpreter support for the batched op set and helper ops.
-- Extend the new autodiff/compiler stack beyond the MVP op set so the new forward tensor surface can participate in tracing.
-- Keep Stage 3 semantics aligned with the legacy engine:
-  - implicit broadcasting in IR
-  - single-axis `sum` / `max`
-  - forward-only `max`
-  - full batched `matmul`
-- Keep the legacy engine in place while the new engine is expanded and training is migrated onto it.
+- Stage 5: migrate `nn`, `losses`, `optim`, `mnist`, and the training scripts onto the new engine.
+- Keep the legacy engine in place while the training stack is migrated and validated on the new path.
+- Preserve the current batched training style during the migration rather than rewriting training into per-sample loops.
 
 ### Next
 
-- Stage 4: expand autodiff rules in the fixed order for broadcasted elementwise ops, reductions, `relu`, `matmul`, and `max`.
-- Port `nn`, `losses`, `optim`, `mnist`, and the training scripts to the new engine once batched ops and gradients are complete.
 - Remove the legacy engine and its engine-specific tests after the new training path is validated.
 
 ### Later
@@ -171,14 +192,14 @@ The legacy engine remains in the repository until the new autodiff path is valid
 - Implement the migration in six stages:
   - Stage 1: generic strided layout foundation for broadcasted and transposed views, with dense backing storage and no hidden materialization (done)
   - Stage 2: eager batched forward ops (`broadcast`, `sum`, `max`, `relu`, and `matmul`) (done)
-  - Stage 3: IR and interpreter support for the new op set plus internal helper ops, with implicit broadcast semantics and single-axis reductions (current)
-  - Stage 4: autodiff expansion in the fixed order:
+  - Stage 3: IR and interpreter support for the new op set plus internal helper ops, with implicit broadcast semantics and single-axis reductions (done)
+  - Stage 4: autodiff expansion in the fixed order (done):
     - Stage 4.1: broadcasted `add` / `sub`, `sum(axis, keepdim)`, and `SumToShape`
     - Stage 4.2: broadcasted `mul` / `div`
     - Stage 4.3: `relu`
     - Stage 4.4: `matmul`
     - Stage 4.5: `max(axis, keepdim)`
-  - Stage 5: training stack migration onto the new engine
+  - Stage 5: training stack migration onto the new engine (current)
   - Stage 6: legacy engine removal and validation cleanup
 - Keep `Recorder` as the shared low-level builder while the migration converges. Treat `JvpRecorder` as a higher-level linearization helper rather than the permanent replacement for `Recorder`.
 - Validate each stage with new-engine white-box tests, finite differences, and legacy-engine parity where overlap exists.

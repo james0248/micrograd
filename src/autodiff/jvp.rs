@@ -2,7 +2,7 @@ use std::cell::RefCell;
 
 use crate::tensor::{
     DenseTensor, Tensor, TensorInner, TensorSpec, TracedTensor, ValueId, elementwise_binary,
-    mean_all, sum_all, unary_map,
+    matmul, max_axis, max_axis_weights, mean_all, relu, sum_all, sum_axis, unary_map,
 };
 
 use super::Operation;
@@ -75,11 +75,6 @@ pub(crate) fn jvp_binary(lhs: &Tensor, rhs: &Tensor, op: Operation) -> Option<Te
     let output = with_jvp_recorder(|recorder| {
         let lhs = jvp_operand(recorder, lhs);
         let rhs = jvp_operand(recorder, rhs);
-        assert_eq!(
-            lhs.primal.shape, rhs.primal.shape,
-            "autodiff does not support broadcasted {:?} yet",
-            op
-        );
         let primal = eager_binary(&op, &lhs.primal, &rhs.primal);
         let spec = primal.spec();
         let tangent = match op {
@@ -123,9 +118,8 @@ pub(crate) fn jvp_binary(lhs: &Tensor, rhs: &Tensor, op: Operation) -> Option<Te
                     .var
             }
             Operation::Div => {
-                let lhs_coeff = unary_map(&rhs.primal, |x| 1.0 / x);
-                let rhs_coeff =
-                    elementwise_binary(&lhs.primal, &rhs.primal, |x, y| -x / (y * y));
+                let lhs_coeff = elementwise_binary(&lhs.primal, &rhs.primal, |_x, y| 1.0 / y);
+                let rhs_coeff = elementwise_binary(&lhs.primal, &rhs.primal, |x, y| -x / (y * y));
                 let lhs_residual = recorder.add_residual(lhs_coeff).var;
                 let rhs_residual = recorder.add_residual(rhs_coeff).var;
                 let lhs_term = recorder
@@ -139,6 +133,27 @@ pub(crate) fn jvp_binary(lhs: &Tensor, rhs: &Tensor, op: Operation) -> Option<Te
                     .add_instruction(
                         Operation::Mul,
                         vec![rhs.tangent.var, rhs_residual],
+                        spec.clone(),
+                    )
+                    .var;
+                recorder
+                    .add_instruction(Operation::Add, vec![lhs_term, rhs_term], spec.clone())
+                    .var
+            }
+            Operation::MatMul => {
+                let lhs_residual = recorder.add_residual(lhs.primal.clone()).var;
+                let rhs_residual = recorder.add_residual(rhs.primal.clone()).var;
+                let lhs_term = recorder
+                    .add_instruction(
+                        Operation::MatMul,
+                        vec![lhs.tangent.var, rhs_residual],
+                        spec.clone(),
+                    )
+                    .var;
+                let rhs_term = recorder
+                    .add_instruction(
+                        Operation::MatMul,
+                        vec![lhs_residual, rhs.tangent.var],
                         spec.clone(),
                     )
                     .var;
@@ -182,6 +197,42 @@ pub(crate) fn jvp_unary(input: &Tensor, op: Operation) -> Option<Tensor> {
                     .add_instruction(
                         Operation::Mul,
                         vec![jvp.tangent.var, reciprocal],
+                        spec.clone(),
+                    )
+                    .var
+            }
+            Operation::Sum { axis, keepdim } => {
+                recorder
+                    .add_instruction(
+                        Operation::Sum { axis, keepdim },
+                        vec![jvp.tangent.var],
+                        spec.clone(),
+                    )
+                    .var
+            }
+            Operation::Relu => {
+                let mask = recorder
+                    .add_residual(unary_map(&jvp.primal, |x| if x > 0.0 { 1.0 } else { 0.0 }))
+                    .var;
+                recorder
+                    .add_instruction(Operation::Mul, vec![jvp.tangent.var, mask], spec.clone())
+                    .var
+            }
+            Operation::Max { axis, keepdim } => {
+                let weights = recorder
+                    .add_residual(max_axis_weights(&jvp.primal, axis, keepdim))
+                    .var;
+                let weighted = recorder
+                    .add_instruction(
+                        Operation::Mul,
+                        vec![jvp.tangent.var, weights],
+                        jvp.primal.spec(),
+                    )
+                    .var;
+                recorder
+                    .add_instruction(
+                        Operation::Sum { axis, keepdim },
+                        vec![weighted],
                         spec.clone(),
                     )
                     .var
@@ -318,6 +369,7 @@ fn eager_binary(op: &Operation, lhs: &DenseTensor, rhs: &DenseTensor) -> DenseTe
         Operation::Sub => elementwise_binary(lhs, rhs, |x, y| x - y),
         Operation::Mul => elementwise_binary(lhs, rhs, |x, y| x * y),
         Operation::Div => elementwise_binary(lhs, rhs, |x, y| x / y),
+        Operation::MatMul => matmul(lhs, rhs),
         _ => panic!("eager_binary does not support operation {:?}", op),
     }
 }
@@ -326,6 +378,9 @@ fn eager_unary(op: &Operation, input: &DenseTensor) -> DenseTensor {
     match op {
         Operation::Exp => unary_map(input, |x| x.exp()),
         Operation::Log => unary_map(input, |x| x.ln()),
+        Operation::Sum { axis, keepdim } => sum_axis(input, *axis, *keepdim),
+        Operation::Max { axis, keepdim } => max_axis(input, *axis, *keepdim),
+        Operation::Relu => relu(input),
         Operation::SumAll => sum_all(input),
         Operation::MeanAll => mean_all(input),
         Operation::Transpose { dim0, dim1 } => input.transpose(*dim0, *dim1),

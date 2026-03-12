@@ -81,8 +81,17 @@ impl DenseTensor {
     }
 
     pub(crate) fn is_contiguous(&self) -> bool {
-        self.offset + numel(&self.shape) <= self.storage.len()
-            && self.strides == contiguous_strides(&self.shape)
+        if self.offset + numel(&self.shape) > self.storage.len() {
+            return false;
+        }
+        let mut acc = 1usize;
+        for i in (0..self.shape.len()).rev() {
+            if self.strides[i] != acc {
+                return false;
+            }
+            acc *= self.shape[i];
+        }
+        true
     }
 
     pub(crate) fn value_at(&self, coords: &[usize]) -> f32 {
@@ -172,29 +181,149 @@ pub(crate) fn max_axis(input: &DenseTensor, axis: usize, keepdim: bool) -> Dense
     reduce_axis(input, axis, keepdim, f32::NEG_INFINITY, f32::max)
 }
 
+pub(crate) fn max_axis_weights(input: &DenseTensor, axis: usize, keepdim: bool) -> DenseTensor {
+    let maxima = max_axis(input, axis, keepdim);
+    let out_shape = reduced_shape(&input.shape, axis, keepdim);
+    let total = numel(&input.shape);
+    let mut is_max = vec![false; total];
+    let mut tie_counts = vec![0usize; numel(&out_shape)];
+
+    let mut idx = 0usize;
+    for_each_index(&input.shape, |coords| {
+        let input_i = input.offset + offset_from_coords(coords, &input.strides);
+        let max_i =
+            reduced_offset_from_input_coords(coords, &out_shape, &maxima.strides, axis, keepdim);
+        if input.storage[input_i] == maxima.storage[maxima.offset + max_i] {
+            is_max[idx] = true;
+            tie_counts[max_i] += 1;
+        }
+        idx += 1;
+    });
+
+    let mut weights = Vec::with_capacity(total);
+    let mut idx = 0usize;
+    for_each_index(&input.shape, |coords| {
+        if is_max[idx] {
+            let max_i = reduced_offset_from_input_coords(
+                coords, &out_shape, &maxima.strides, axis, keepdim,
+            );
+            weights.push(1.0 / tie_counts[max_i] as f32);
+        } else {
+            weights.push(0.0);
+        }
+        idx += 1;
+    });
+
+    DenseTensor::from_vec(weights, input.shape.clone())
+}
+
+pub(crate) fn sum_to_shape(input: &DenseTensor, target_shape: &[usize]) -> DenseTensor {
+    assert!(
+        target_shape.len() <= input.shape.len(),
+        "cannot sum to higher-rank shape: input={:?}, target={:?}",
+        input.shape,
+        target_shape
+    );
+
+    let rank_offset = input.shape.len() - target_shape.len();
+    for (axis, &target_dim) in target_shape.iter().enumerate() {
+        let input_dim = input.shape[rank_offset + axis];
+        assert!(
+            target_dim == 1 || target_dim == input_dim,
+            "sum_to_shape mismatch: input={:?}, target={:?}",
+            input.shape,
+            target_shape
+        );
+    }
+
+    let target_strides = contiguous_strides(target_shape);
+    let mut out = vec![0.0; numel(target_shape)];
+    for_each_index(&input.shape, |coords| {
+        let input_i = input.offset + offset_from_coords(coords, &input.strides);
+        let mut out_i = 0usize;
+        for axis in 0..target_shape.len() {
+            let input_axis = rank_offset + axis;
+            let target_coord = if target_shape[axis] == 1 {
+                0
+            } else {
+                coords[input_axis]
+            };
+            out_i += target_coord * target_strides[axis];
+        }
+        out[out_i] += input.storage[input_i];
+    });
+
+    DenseTensor::from_vec(out, target_shape.to_vec())
+}
+
+pub(crate) fn expand_to_shape(
+    input: &DenseTensor,
+    target_shape: &[usize],
+    inserted_axes: &[usize],
+) -> DenseTensor {
+    assert!(
+        input.shape.len() + inserted_axes.len() == target_shape.len()
+            || (input.shape.len() == target_shape.len() && inserted_axes.is_empty()),
+        "expand_to_shape rank mismatch: input={:?}, target={:?}, inserted_axes={:?}",
+        input.shape,
+        target_shape,
+        inserted_axes
+    );
+
+    debug_assert!(
+        inserted_axes.windows(2).all(|w| w[0] < w[1]),
+        "expand_to_shape inserted_axes must be sorted and unique: {:?}",
+        inserted_axes
+    );
+
+    let source_strides = contiguous_strides(&input.shape);
+    let mut out = Vec::with_capacity(numel(target_shape));
+    for_each_index(target_shape, |coords| {
+        let mut source_offset = 0usize;
+        let mut source_axis = 0usize;
+        for (target_axis, &coord) in coords.iter().enumerate() {
+            if inserted_axes.binary_search(&target_axis).is_ok() {
+                continue;
+            }
+
+            let source_dim = input.shape[source_axis];
+            debug_assert!(
+                source_dim == 1 || source_dim == target_shape[target_axis],
+                "expand_to_shape mismatch at axis {}: input={:?}, target={:?}, inserted_axes={:?}",
+                target_axis,
+                input.shape,
+                target_shape,
+                inserted_axes
+            );
+            if source_dim != 1 {
+                source_offset += coord * source_strides[source_axis];
+            }
+            source_axis += 1;
+        }
+        debug_assert_eq!(
+            source_axis,
+            input.shape.len(),
+            "expand_to_shape did not consume all source axes: input={:?}, target={:?}, inserted_axes={:?}",
+            input.shape,
+            target_shape,
+            inserted_axes
+        );
+        out.push(input.storage[input.offset + source_offset]);
+    });
+
+    DenseTensor::from_vec(out, target_shape.to_vec())
+}
+
 pub(crate) fn matmul(lhs: &DenseTensor, rhs: &DenseTensor) -> DenseTensor {
     let lhs_shape = &lhs.shape;
     let rhs_shape = &rhs.shape;
-    assert!(
-        lhs_shape.len() >= 2 && rhs_shape.len() >= 2,
-        "matmul expects rank >= 2: left={:?}, right={:?}",
-        lhs_shape,
-        rhs_shape
-    );
-
+    let out_shape = matmul_shape(lhs_shape, rhs_shape);
     let m = lhs_shape[lhs_shape.len() - 2];
     let k = lhs_shape[lhs_shape.len() - 1];
-    let rhs_k = rhs_shape[rhs_shape.len() - 2];
     let n = rhs_shape[rhs_shape.len() - 1];
-    assert_eq!(
-        k, rhs_k,
-        "matmul shape mismatch: left={:?}, right={:?}",
-        lhs_shape, rhs_shape
-    );
-
     let lhs_batch = &lhs_shape[..lhs_shape.len() - 2];
     let rhs_batch = &rhs_shape[..rhs_shape.len() - 2];
-    let batch_shape = broadcast_shape(lhs_batch, rhs_batch);
+    let batch_shape = &out_shape[..out_shape.len() - 2];
     let lhs_batch_strides =
         broadcast_strides_for(lhs_batch, &lhs.strides[..lhs_batch.len()], &batch_shape);
     let rhs_batch_strides =
@@ -202,9 +331,6 @@ pub(crate) fn matmul(lhs: &DenseTensor, rhs: &DenseTensor) -> DenseTensor {
     let batch_strides = contiguous_strides(&batch_shape);
 
     let out_block = m * n;
-    let mut out_shape = batch_shape.clone();
-    out_shape.push(m);
-    out_shape.push(n);
     let mut out = vec![0.0; numel(&out_shape)];
 
     for_each_index(&batch_shape, |batch_coords| {
@@ -235,6 +361,32 @@ pub(crate) fn matmul(lhs: &DenseTensor, rhs: &DenseTensor) -> DenseTensor {
     });
 
     DenseTensor::from_vec(out, out_shape)
+}
+
+pub(crate) fn matmul_shape(lhs_shape: &[usize], rhs_shape: &[usize]) -> Vec<usize> {
+    assert!(
+        lhs_shape.len() >= 2 && rhs_shape.len() >= 2,
+        "matmul expects rank >= 2: left={:?}, right={:?}",
+        lhs_shape,
+        rhs_shape
+    );
+
+    let k = lhs_shape[lhs_shape.len() - 1];
+    let rhs_k = rhs_shape[rhs_shape.len() - 2];
+    assert_eq!(
+        k, rhs_k,
+        "matmul shape mismatch: left={:?}, right={:?}",
+        lhs_shape, rhs_shape
+    );
+
+    let lhs_batch = &lhs_shape[..lhs_shape.len() - 2];
+    let rhs_batch = &rhs_shape[..rhs_shape.len() - 2];
+    let batch_shape = broadcast_shape(lhs_batch, rhs_batch);
+
+    let mut out_shape = batch_shape;
+    out_shape.push(lhs_shape[lhs_shape.len() - 2]);
+    out_shape.push(rhs_shape[rhs_shape.len() - 1]);
+    out_shape
 }
 
 pub(crate) fn numel(shape: &[usize]) -> usize {

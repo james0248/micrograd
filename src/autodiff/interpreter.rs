@@ -1,5 +1,6 @@
 use crate::tensor::{
-    DenseTensor, Tensor, TensorInner, elementwise_binary, mean_all, sum_all, unary_map,
+    DenseTensor, Tensor, TensorInner, elementwise_binary, expand_to_shape, matmul, max_axis,
+    mean_all, relu, sum_all, sum_axis, sum_to_shape, unary_map,
 };
 
 use super::ir::{Operation, Trace};
@@ -78,6 +79,33 @@ pub(crate) fn execute_trace(trace: &Trace, inputs: &[DenseTensor]) -> Vec<DenseT
                     .expect("log input value must exist");
                 unary_map(input, |x| x.ln())
             }
+            Operation::Sum { axis, keepdim } => {
+                let input = values[instruction.inputs[0]]
+                    .as_ref()
+                    .expect("sum input value must exist");
+                sum_axis(input, *axis, *keepdim)
+            }
+            Operation::Max { axis, keepdim } => {
+                let input = values[instruction.inputs[0]]
+                    .as_ref()
+                    .expect("max input value must exist");
+                max_axis(input, *axis, *keepdim)
+            }
+            Operation::Relu => {
+                let input = values[instruction.inputs[0]]
+                    .as_ref()
+                    .expect("relu input value must exist");
+                relu(input)
+            }
+            Operation::MatMul => {
+                let lhs = values[instruction.inputs[0]]
+                    .as_ref()
+                    .expect("matmul lhs value must exist");
+                let rhs = values[instruction.inputs[1]]
+                    .as_ref()
+                    .expect("matmul rhs value must exist");
+                matmul(lhs, rhs)
+            }
             Operation::SumAll => {
                 let input = values[instruction.inputs[0]]
                     .as_ref()
@@ -95,6 +123,21 @@ pub(crate) fn execute_trace(trace: &Trace, inputs: &[DenseTensor]) -> Vec<DenseT
                     .as_ref()
                     .expect("transpose input value must exist");
                 input.transpose(*dim0, *dim1)
+            }
+            Operation::SumToShape { shape } => {
+                let input = values[instruction.inputs[0]]
+                    .as_ref()
+                    .expect("sum_to_shape input value must exist");
+                sum_to_shape(input, shape)
+            }
+            Operation::ExpandToShape {
+                shape,
+                inserted_axes,
+            } => {
+                let input = values[instruction.inputs[0]]
+                    .as_ref()
+                    .expect("expand_to_shape input value must exist");
+                expand_to_shape(input, shape, inserted_axes)
             }
             Operation::ExpandScalar { shape } => {
                 let input = values[instruction.inputs[0]]

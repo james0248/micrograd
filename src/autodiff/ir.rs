@@ -8,10 +8,33 @@ pub(crate) enum Operation {
     Div,
     Exp,
     Log,
+    Sum {
+        axis: usize,
+        keepdim: bool,
+    },
+    #[cfg_attr(not(test), allow(dead_code))]
+    Max {
+        axis: usize,
+        keepdim: bool,
+    },
+    Relu,
+    MatMul,
     SumAll,
     MeanAll,
-    Transpose { dim0: usize, dim1: usize },
-    ExpandScalar { shape: Vec<usize> },
+    Transpose {
+        dim0: usize,
+        dim1: usize,
+    },
+    SumToShape {
+        shape: Vec<usize>,
+    },
+    ExpandToShape {
+        shape: Vec<usize>,
+        inserted_axes: Vec<usize>,
+    },
+    ExpandScalar {
+        shape: Vec<usize>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
