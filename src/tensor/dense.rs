@@ -205,7 +205,11 @@ pub(crate) fn max_axis_weights(input: &DenseTensor, axis: usize, keepdim: bool) 
     for_each_index(&input.shape, |coords| {
         if is_max[idx] {
             let max_i = reduced_offset_from_input_coords(
-                coords, &out_shape, &maxima.strides, axis, keepdim,
+                coords,
+                &out_shape,
+                &maxima.strides,
+                axis,
+                keepdim,
             );
             weights.push(1.0 / tie_counts[max_i] as f32);
         } else {

@@ -1,4 +1,4 @@
-use crate::engine::Tensor;
+use crate::tensor::Tensor;
 
 pub fn cross_entropy_with_logits(logits: &Tensor, targets: &[u8]) -> Tensor {
     let shape = logits.shape();
@@ -36,5 +36,5 @@ pub fn cross_entropy_with_logits(logits: &Tensor, targets: &[u8]) -> Tensor {
     let lse = shifted.exp().sum(1, true).log();
     let one_hot_t = Tensor::from_vec(one_hot, vec![batch, classes]);
     let target_logits = shifted.mul(&one_hot_t).sum(1, true);
-    lse.sub(&target_logits).mean()
+    lse.sub(&target_logits).mean_all()
 }

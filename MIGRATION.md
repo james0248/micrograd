@@ -56,7 +56,8 @@ The legacy engine remains in the repository until the new autodiff path is valid
   - `relu`
   - `matmul`
 - `max(axis, keepdim)` now uses evenly split tie gradients, matching the legacy engine.
-- The current training stack (`nn`, `losses`, `optim`, `mnist`) still depends on the legacy engine because it has not yet been migrated onto the new path.
+- The current training stack (`nn`, `losses`, `optim`, `mnist`) now runs on the new `tensor` + `autodiff` path.
+- The legacy engine remains in the repository only as a compatibility baseline and external parity reference.
 - General `sum(axes, keepdim)` and `mean(axes, keepdim)` are part of the long-term direction; the current `sum_all` / `mean_all` API is still transitional.
 
 ## Desired State
@@ -166,16 +167,25 @@ The legacy engine remains in the repository until the new autodiff path is valid
   - `matmul` now differentiates with full legacy batch-broadcast semantics
   - `max(axis, keepdim)` now linearizes through tie-weight residuals and splits ties evenly
   - public `value_and_grad` and `grad` now work across the full current batched op set
+- Stage 5 training-stack migration is complete:
+  - `nn`, `losses`, `optim`, and `mnist` now use `tensor::Tensor` and `autodiff::value_and_grad`
+  - model updates now use explicit gradients instead of engine-owned grad buffers
+  - SGD now consumes explicit grads and mutates model state through `Parameterized`
+  - checkpoint save/load remains compatible while using `to_vec()` and mutable weight loading
+  - the training loop preserves the current batched style on the new engine
 
 ### Current
 
-- Stage 5: migrate `nn`, `losses`, `optim`, `mnist`, and the training scripts onto the new engine.
-- Keep the legacy engine in place while the training stack is migrated and validated on the new path.
-- Preserve the current batched training style during the migration rather than rewriting training into per-sample loops.
+- Stage 6: remove the legacy engine and its engine-specific tests.
+- Keep validation strength high while trimming the old path:
+  - finite-difference coverage
+  - new-engine white-box tests
+  - training smoke tests
+  - checkpoint and MNIST integration tests
 
 ### Next
 
-- Remove the legacy engine and its engine-specific tests after the new training path is validated.
+- Remove the legacy engine from the public training path and delete engine-specific compatibility tests and helpers.
 
 ### Later
 
@@ -199,8 +209,8 @@ The legacy engine remains in the repository until the new autodiff path is valid
     - Stage 4.3: `relu`
     - Stage 4.4: `matmul`
     - Stage 4.5: `max(axis, keepdim)`
-  - Stage 5: training stack migration onto the new engine (current)
-  - Stage 6: legacy engine removal and validation cleanup
+  - Stage 5: training stack migration onto the new engine (done)
+  - Stage 6: legacy engine removal and validation cleanup (current)
 - Keep `Recorder` as the shared low-level builder while the migration converges. Treat `JvpRecorder` as a higher-level linearization helper rather than the permanent replacement for `Recorder`.
 - Validate each stage with new-engine white-box tests, finite differences, and legacy-engine parity where overlap exists.
 

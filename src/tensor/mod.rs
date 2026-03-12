@@ -40,6 +40,10 @@ impl Tensor {
         }
     }
 
+    pub fn numel(&self) -> usize {
+        self.shape().iter().product()
+    }
+
     pub fn to_vec(&self) -> Vec<f32> {
         match &self.inner {
             TensorInner::Concrete(tensor) => tensor.to_vec(),

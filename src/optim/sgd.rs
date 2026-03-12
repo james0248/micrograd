@@ -1,16 +1,15 @@
-use crate::engine::Tensor;
-use crate::optim::Optimizer;
+use crate::optim::{Optimizer, Parameterized};
+use crate::tensor::Tensor;
 
 #[derive(Debug, Clone)]
 pub struct Sgd {
-    params: Vec<Tensor>,
     lr: f32,
 }
 
 impl Sgd {
-    pub fn new(params: Vec<Tensor>, lr: f32) -> Self {
+    pub fn new(lr: f32) -> Self {
         assert!(lr > 0.0, "learning rate must be > 0");
-        Self { params, lr }
+        Self { lr }
     }
 
     pub fn set_lr(&mut self, lr: f32) {
@@ -24,15 +23,7 @@ impl Sgd {
 }
 
 impl Optimizer for Sgd {
-    fn zero_grad(&mut self) {
-        for p in &self.params {
-            p.zero_grad();
-        }
-    }
-
-    fn step(&mut self) {
-        for p in &self.params {
-            p.sgd_step(self.lr);
-        }
+    fn step<M: Parameterized>(&mut self, model: &mut M, grads: &[Tensor]) {
+        model.apply_gradients(grads, self.lr);
     }
 }
