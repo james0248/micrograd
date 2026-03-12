@@ -2,42 +2,46 @@
 
 ## Project Objective
 
-- Build a Rust version of Karpathy-style micrograd as a 1-day project.
-- Keep scope scalar-first and parity-first, then evolve complexity by roadmap milestone.
-- Prioritize project progress and correctness; learning is a guided side effect.
+- Maintain and improve the current `tangent` tensor/autodiff engine.
+- Prioritize correctness, explicit data flow, and small understandable APIs.
+- Treat the legacy tape-engine migration as complete; current work is feature, cleanup, and performance work on the new engine.
 
-## Idiomatic Rust Conventions
+## Current Architecture
 
-- Use explicit ownership and borrowing; avoid hiding lifetime/ownership behavior.
-- Prefer small, clear APIs and explicit data flow over clever abstractions.
-- Use `f64` for scalar math unless a milestone explicitly changes this.
-- Use `Result` for fallible paths where reasonable; avoid unnecessary `unwrap`.
-- Keep code readable and modular (`engine`, `nn`, `main` orchestration).
-- External dependency policy: only `rand` is allowed.
+- The runtime engine is `tensor` + `autodiff`.
+- Autodiff is based on internal tracing, linearization, and transpose-based pullback construction.
+- Public differentiation APIs are:
+  - `grad(f, inputs)`
+  - `value_and_grad(f, inputs)`
+- Model training uses explicit parameter tensors and explicit gradient application.
+- Tensor storage is dense with generic strided layouts for view semantics.
+- Public tensor materialization is explicit via `to_vec()`.
 
-## Architecture Defaults
+## Rust Conventions
 
-- Use a hidden thread-local runtime with explicit `with_grad(...)` / `no_grad(...)` contexts.
-- Represent `Value` as lightweight handles into runtime-managed parameter/temp storage.
-- Use DAG topological traversal for `backward`.
-- Make gradient accumulation explicit and test it on shared subgraphs.
+- Prefer explicit ownership and borrowing over hidden behavior.
+- Keep APIs small, readable, and easy to debug.
+- Use `f32` for the current tensor/autodiff path.
+- Use `Result` for fallible I/O and persistence paths where appropriate.
+- Avoid unnecessary `unwrap`; keep panic paths explicit and descriptive when invariants are intentionally enforced.
+
+## Dependency Policy
+
+- Keep dependencies minimal.
+- Current repo-approved dependencies already include `rand`, `serde`, and `bincode`.
+- Do not add new dependencies without a clear justification.
 
 ## Testing Requirements
 
-- Add explicit tests for forward correctness and backward gradients.
-- Include finite-difference gradient checks implemented with std-only helpers.
-- Treat `cargo test` as a mandatory quality gate for milestone completion.
-- Keep tests deterministic where possible (seed randomness in demos/tests).
+- Add explicit forward and backward tests for new tensor/autodiff behavior.
+- Keep finite-difference checks in the test suite for gradient-sensitive changes.
+- Treat `cargo test` as a mandatory quality gate.
+- Prefer deterministic tests and seeded randomness.
 
-## Milestone Learning Workflow
+## Documentation
 
-- After each roadmap milestone, collect the Rust concepts used in that milestone.
-- Ask for an interactive Rust learning section tailored to the implemented work.
-- Keep interaction fluid (custom prompts), not a fixed template.
-- Maintain implementation progress as the primary objective.
-
-## Roadmap Stage Tracking
-
-- `ROADMAP.md` must always include a visible `Current Stage`.
-- Update the stage only when the current stage acceptance criteria are fully met.
-- Record `Last Updated` date when stage status changes.
+- Keep `MIGRATION.md` as a concise migration summary, not an active work log.
+- Track remaining work in:
+  - `docs/PERF.md`
+  - `docs/IMPROVEMENTS.md`
+  - `docs/BACKLOG.md`
