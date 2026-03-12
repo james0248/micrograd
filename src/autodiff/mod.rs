@@ -12,7 +12,7 @@ use crate::tensor::{DenseTensor, Tensor};
 use interpreter::concrete_inputs;
 pub(crate) use ir::Operation;
 use jvp::linearize;
-pub(crate) use jvp::{jvp_binary, jvp_unary};
+pub(crate) use jvp::{linearize_binary, linearize_unary};
 use transpose::transpose_linearized;
 
 pub fn grad<F>(f: F, inputs: &[Tensor]) -> Vec<Tensor>

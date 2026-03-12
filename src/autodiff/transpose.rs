@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::tensor::{DenseTensor, TensorSpec, ValueId, matmul_shape};
+use crate::tensor::{DenseTensor, TensorSpec, ValueId, matmul_shape, reduction_size};
 
 use super::interpreter::execute_trace;
 use super::ir::{Operation, build_spec_table};
@@ -224,17 +224,12 @@ pub(crate) fn transpose_linearized(linearized: &Linearized) -> Pullback {
             Operation::Div | Operation::Exp | Operation::Log => {
                 unreachable!("validated by tangent_dependency_table")
             }
-            Operation::Sum { axis, keepdim } => {
+            Operation::Sum { axes, keepdim } => {
                 if depends_on_tangent[instruction.inputs[0]] {
                     let input_spec = specs[instruction.inputs[0]]
                         .as_ref()
                         .expect("sum input spec must exist");
-                    let inserted_axes =
-                        if *keepdim || input_spec.shape.len() == instruction.spec.shape.len() {
-                            Vec::new()
-                        } else {
-                            vec![*axis]
-                        };
+                    let inserted_axes = if *keepdim { Vec::new() } else { axes.clone() };
                     let d_input = recorder
                         .add_instruction(
                             Operation::ExpandToShape {
@@ -244,6 +239,38 @@ pub(crate) fn transpose_linearized(linearized: &Linearized) -> Pullback {
                             vec![out_cotangent],
                             input_spec.clone(),
                         )
+                        .var;
+                    accumulate_cotangent(
+                        &mut recorder,
+                        &mut cotangents,
+                        instruction.inputs[0],
+                        d_input,
+                        input_spec,
+                    );
+                }
+            }
+            Operation::Mean { axes, keepdim } => {
+                if depends_on_tangent[instruction.inputs[0]] {
+                    let input_spec = specs[instruction.inputs[0]]
+                        .as_ref()
+                        .expect("mean input spec must exist");
+                    let inserted_axes = if *keepdim { Vec::new() } else { axes.clone() };
+                    let expanded = recorder
+                        .add_instruction(
+                            Operation::ExpandToShape {
+                                shape: input_spec.shape.clone(),
+                                inserted_axes,
+                            },
+                            vec![out_cotangent],
+                            input_spec.clone(),
+                        )
+                        .var;
+                    let scale = recorder.add_const_tensor(DenseTensor::filled(
+                        input_spec.shape.clone(),
+                        1.0 / reduction_size(&input_spec.shape, axes) as f32,
+                    ));
+                    let d_input = recorder
+                        .add_instruction(Operation::Mul, vec![expanded, scale], input_spec.clone())
                         .var;
                     accumulate_cotangent(
                         &mut recorder,
@@ -366,59 +393,6 @@ pub(crate) fn transpose_linearized(linearized: &Linearized) -> Pullback {
                     );
                 }
             }
-            Operation::SumAll => {
-                if depends_on_tangent[instruction.inputs[0]] {
-                    let input_spec = specs[instruction.inputs[0]]
-                        .as_ref()
-                        .expect("sum_all input spec must exist");
-                    let expanded = recorder
-                        .add_instruction(
-                            Operation::ExpandScalar {
-                                shape: input_spec.shape.clone(),
-                            },
-                            vec![out_cotangent],
-                            input_spec.clone(),
-                        )
-                        .var;
-                    accumulate_cotangent(
-                        &mut recorder,
-                        &mut cotangents,
-                        instruction.inputs[0],
-                        expanded,
-                        input_spec,
-                    );
-                }
-            }
-            Operation::MeanAll => {
-                if depends_on_tangent[instruction.inputs[0]] {
-                    let input_spec = specs[instruction.inputs[0]]
-                        .as_ref()
-                        .expect("mean_all input spec must exist");
-                    let expanded = recorder
-                        .add_instruction(
-                            Operation::ExpandScalar {
-                                shape: input_spec.shape.clone(),
-                            },
-                            vec![out_cotangent],
-                            input_spec.clone(),
-                        )
-                        .var;
-                    let scale = recorder.add_const_tensor(DenseTensor::filled(
-                        input_spec.shape.clone(),
-                        1.0 / input_spec.numel() as f32,
-                    ));
-                    let d_input = recorder
-                        .add_instruction(Operation::Mul, vec![expanded, scale], input_spec.clone())
-                        .var;
-                    accumulate_cotangent(
-                        &mut recorder,
-                        &mut cotangents,
-                        instruction.inputs[0],
-                        d_input,
-                        input_spec,
-                    );
-                }
-            }
             Operation::Transpose { dim0, dim1 } => {
                 if depends_on_tangent[instruction.inputs[0]] {
                     let input_spec = specs[instruction.inputs[0]]
@@ -444,9 +418,6 @@ pub(crate) fn transpose_linearized(linearized: &Linearized) -> Pullback {
                 }
             }
             Operation::SumToShape { .. } | Operation::ExpandToShape { .. } => {
-                unreachable!("validated by tangent_dependency_table")
-            }
-            Operation::ExpandScalar { .. } => {
                 unreachable!("validated by tangent_dependency_table")
             }
         }
@@ -558,10 +529,9 @@ fn tangent_dependency_table(linearized: &Linearized) -> Vec<bool> {
                     instruction.op
                 )
             }
-            Operation::Sum { .. }
-            | Operation::SumAll
-            | Operation::MeanAll
-            | Operation::Transpose { .. } => depends_on_tangent[instruction.inputs[0]],
+            Operation::Sum { .. } | Operation::Mean { .. } | Operation::Transpose { .. } => {
+                depends_on_tangent[instruction.inputs[0]]
+            }
             Operation::Max { .. } => {
                 panic!(
                     "linearized trace must not contain Max; capture max tie weights as a residual"
@@ -577,14 +547,10 @@ fn tangent_dependency_table(linearized: &Linearized) -> Vec<bool> {
                     "SumToShape and ExpandToShape are internal backward ops and must not appear in linearized traces"
                 )
             }
-            Operation::ExpandScalar { .. } => {
-                panic!(
-                    "ExpandScalar is an internal backward op and must not appear in linearized traces"
-                )
-            }
         };
         depends_on_tangent[instruction.out] = depends;
     }
 
     depends_on_tangent
 }
+

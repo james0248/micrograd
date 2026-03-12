@@ -1,6 +1,6 @@
 use crate::tensor::{
-    DenseTensor, Tensor, TensorInner, elementwise_binary, expand_to_shape, matmul, max_axis,
-    mean_all, relu, sum_all, sum_axis, sum_to_shape, unary_map,
+    DenseTensor, Tensor, TensorInner, elementwise_binary, expand_to_shape, matmul, max_axis, mean,
+    relu, sum, sum_to_shape, unary_map,
 };
 
 use super::ir::{Operation, Trace};
@@ -79,11 +79,17 @@ pub(crate) fn execute_trace(trace: &Trace, inputs: &[DenseTensor]) -> Vec<DenseT
                     .expect("log input value must exist");
                 unary_map(input, |x| x.ln())
             }
-            Operation::Sum { axis, keepdim } => {
+            Operation::Sum { axes, keepdim } => {
                 let input = values[instruction.inputs[0]]
                     .as_ref()
                     .expect("sum input value must exist");
-                sum_axis(input, *axis, *keepdim)
+                sum(input, axes, *keepdim)
+            }
+            Operation::Mean { axes, keepdim } => {
+                let input = values[instruction.inputs[0]]
+                    .as_ref()
+                    .expect("mean input value must exist");
+                mean(input, axes, *keepdim)
             }
             Operation::Max { axis, keepdim } => {
                 let input = values[instruction.inputs[0]]
@@ -106,18 +112,6 @@ pub(crate) fn execute_trace(trace: &Trace, inputs: &[DenseTensor]) -> Vec<DenseT
                     .expect("matmul rhs value must exist");
                 matmul(lhs, rhs)
             }
-            Operation::SumAll => {
-                let input = values[instruction.inputs[0]]
-                    .as_ref()
-                    .expect("sum_all input value must exist");
-                sum_all(input)
-            }
-            Operation::MeanAll => {
-                let input = values[instruction.inputs[0]]
-                    .as_ref()
-                    .expect("mean_all input value must exist");
-                mean_all(input)
-            }
             Operation::Transpose { dim0, dim1 } => {
                 let input = values[instruction.inputs[0]]
                     .as_ref()
@@ -138,18 +132,6 @@ pub(crate) fn execute_trace(trace: &Trace, inputs: &[DenseTensor]) -> Vec<DenseT
                     .as_ref()
                     .expect("expand_to_shape input value must exist");
                 expand_to_shape(input, shape, inserted_axes)
-            }
-            Operation::ExpandScalar { shape } => {
-                let input = values[instruction.inputs[0]]
-                    .as_ref()
-                    .expect("expand_scalar input value must exist");
-                assert_eq!(
-                    input.shape,
-                    [1],
-                    "ExpandScalar requires a scalar input, got shape {:?}",
-                    input.shape
-                );
-                DenseTensor::filled(shape.clone(), input.value_at(&[0]))
             }
         };
 

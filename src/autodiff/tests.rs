@@ -125,7 +125,7 @@ fn execute_trace_supports_stage3_batched_ops() {
         recorder.add_instruction(Operation::Relu, vec![add.var], TensorSpec::new(vec![2, 2]));
     let sum = recorder.add_instruction(
         Operation::Sum {
-            axis: 1,
+            axes: vec![1],
             keepdim: false,
         },
         vec![relu.var],
@@ -154,7 +154,7 @@ fn execute_trace_supports_stage3_batched_ops() {
     let expected_sum = Tensor::from_vec(x_val.to_vec(), vec![2, 2])
         .add(&Tensor::from_vec(y_val.to_vec(), vec![2]))
         .relu()
-        .sum(1, false);
+        .sum(&[1], false);
     let expected_max = Tensor::from_vec(x_val.to_vec(), vec![2, 2])
         .matmul(&Tensor::from_vec(w_val.to_vec(), vec![2, 2]))
         .max(1, false);
@@ -255,22 +255,22 @@ fn linearize_log_matches_analytic_jvp() {
 }
 
 #[test]
-fn linearize_sum_all_matches_analytic_jvp() {
+fn linearize_sum_matches_analytic_jvp() {
     let inputs = vec![DenseTensor::from_vec(vec![1.0, 2.0, 3.0], vec![3])];
     let tangents = vec![DenseTensor::from_vec(vec![0.5, -1.0, 2.5], vec![3])];
 
-    let (_output, linearized) = linearize(|xs| xs[0].sum_all(), &inputs);
+    let (_output, linearized) = linearize(|xs| xs[0].sum(&[], false), &inputs);
     let tangent = linearized.apply_dense(&tangents);
 
     assert_dense_close(&tangent, &[2.0], &[1], 1e-6);
 }
 
 #[test]
-fn linearize_mean_all_matches_analytic_jvp() {
+fn linearize_mean_matches_analytic_jvp() {
     let inputs = vec![DenseTensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2])];
     let tangents = vec![DenseTensor::from_vec(vec![2.0, 0.0, -2.0, 4.0], vec![2, 2])];
 
-    let (_output, linearized) = linearize(|xs| xs[0].mean_all(), &inputs);
+    let (_output, linearized) = linearize(|xs| xs[0].mean(&[], false), &inputs);
     let tangent = linearized.apply_dense(&tangents);
 
     assert_dense_close(&tangent, &[1.0], &[1], 1e-6);
@@ -365,7 +365,7 @@ fn linearize_sum_axis_matches_expected_jvp() {
     let inputs = vec![DenseTensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2])];
     let tangents = vec![DenseTensor::from_vec(vec![0.5, -1.0, 2.0, 1.5], vec![2, 2])];
 
-    let (output, linearized) = linearize(|xs| xs[0].sum(1, false), &inputs);
+    let (output, linearized) = linearize(|xs| xs[0].sum(&[1], false), &inputs);
     let tangent = linearized.apply_dense(&tangents);
 
     assert_dense_close(&output, &[3.0, 7.0], &[2], 1e-6);
@@ -617,7 +617,7 @@ fn transpose_pullback_sum_axis_matches_analytic_vjp() {
     let inputs = vec![DenseTensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2])];
     let output_cotangent = DenseTensor::from_vec(vec![2.0, -1.5], vec![2]);
 
-    let (_output, linearized) = linearize(|xs| xs[0].sum(1, false), &inputs);
+    let (_output, linearized) = linearize(|xs| xs[0].sum(&[1], false), &inputs);
     let pullback = transpose_linearized(&linearized);
     let grads = pullback.apply_dense(&output_cotangent);
 
@@ -692,11 +692,11 @@ fn transpose_pullback_log_matches_analytic_vjp() {
 }
 
 #[test]
-fn transpose_pullback_sum_all_matches_analytic_vjp() {
+fn transpose_pullback_sum_matches_analytic_vjp() {
     let inputs = vec![DenseTensor::from_vec(vec![1.0, 2.0, 3.0], vec![3])];
     let output_cotangent = DenseTensor::from_vec(vec![2.5], vec![1]);
 
-    let (_output, linearized) = linearize(|xs| xs[0].sum_all(), &inputs);
+    let (_output, linearized) = linearize(|xs| xs[0].sum(&[], false), &inputs);
     let pullback = transpose_linearized(&linearized);
     let grads = pullback.apply_dense(&output_cotangent);
 
@@ -704,11 +704,11 @@ fn transpose_pullback_sum_all_matches_analytic_vjp() {
 }
 
 #[test]
-fn transpose_pullback_mean_all_matches_analytic_vjp() {
+fn transpose_pullback_mean_matches_analytic_vjp() {
     let inputs = vec![DenseTensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2])];
     let output_cotangent = DenseTensor::from_vec(vec![4.0], vec![1]);
 
-    let (_output, linearized) = linearize(|xs| xs[0].mean_all(), &inputs);
+    let (_output, linearized) = linearize(|xs| xs[0].mean(&[], false), &inputs);
     let pullback = transpose_linearized(&linearized);
     let grads = pullback.apply_dense(&output_cotangent);
 
@@ -746,7 +746,7 @@ fn public_grad_matches_value_and_grad_gradients() {
         Tensor::from_vec(vec![1.5, 2.5], vec![2]),
         Tensor::from_vec(vec![0.5, 1.0], vec![2]),
     ];
-    let f = |xs: &[Tensor]| xs[0].div(&xs[1]).add(&xs[1].log()).sum_all();
+    let f = |xs: &[Tensor]| xs[0].div(&xs[1]).add(&xs[1].log()).sum(&[], false);
 
     let grads = grad(&f, &inputs);
     let (_, expected_grads) = value_and_grad(f, &inputs);

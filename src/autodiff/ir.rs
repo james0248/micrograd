@@ -9,7 +9,11 @@ pub(crate) enum Operation {
     Exp,
     Log,
     Sum {
-        axis: usize,
+        axes: Vec<usize>,
+        keepdim: bool,
+    },
+    Mean {
+        axes: Vec<usize>,
         keepdim: bool,
     },
     #[cfg_attr(not(test), allow(dead_code))]
@@ -19,8 +23,6 @@ pub(crate) enum Operation {
     },
     Relu,
     MatMul,
-    SumAll,
-    MeanAll,
     Transpose {
         dim0: usize,
         dim1: usize,
@@ -31,9 +33,6 @@ pub(crate) enum Operation {
     ExpandToShape {
         shape: Vec<usize>,
         inserted_axes: Vec<usize>,
-    },
-    ExpandScalar {
-        shape: Vec<usize>,
     },
 }
 

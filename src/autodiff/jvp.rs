@@ -2,7 +2,7 @@ use std::cell::RefCell;
 
 use crate::tensor::{
     DenseTensor, Tensor, TensorInner, TensorSpec, TracedTensor, ValueId, elementwise_binary,
-    matmul, max_axis, max_axis_weights, mean_all, relu, sum_all, sum_axis, unary_map,
+    matmul, max_axis, max_axis_weights, mean, relu, sum, unary_map,
 };
 
 use super::Operation;
@@ -11,7 +11,7 @@ use super::ir::Trace;
 use super::trace::Recorder;
 
 thread_local! {
-    static JVP_STACK: RefCell<Vec<JvpRecorder>> = const { RefCell::new(Vec::new()) };
+    static LINEARIZE_STACK: RefCell<Vec<LinearizeRecorder>> = const { RefCell::new(Vec::new()) };
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -62,19 +62,19 @@ pub(crate) fn linearize<F>(f: F, primals: &[DenseTensor]) -> (DenseTensor, Linea
 where
     F: Fn(&[Tensor]) -> Tensor,
 {
-    let (recorder, jvp_inputs) = JvpRecorder::new(primals);
-    let (recorder, output) = with_jvp_scope(recorder, || f(&jvp_inputs));
+    let (recorder, inputs) = LinearizeRecorder::new(primals);
+    let (recorder, output) = with_linearize_scope(recorder, || f(&inputs));
     recorder.into_linearized(output)
 }
 
-pub(crate) fn jvp_binary(lhs: &Tensor, rhs: &Tensor, op: Operation) -> Option<Tensor> {
+pub(crate) fn linearize_binary(lhs: &Tensor, rhs: &Tensor, op: Operation) -> Option<Tensor> {
     if lhs.as_jvp().is_none() && rhs.as_jvp().is_none() {
         return None;
     }
 
-    let output = with_jvp_recorder(|recorder| {
-        let lhs = jvp_operand(recorder, lhs);
-        let rhs = jvp_operand(recorder, rhs);
+    let output = with_linearize_recorder(|recorder| {
+        let lhs = linearize_operand(recorder, lhs);
+        let rhs = linearize_operand(recorder, rhs);
         let primal = eager_binary(&op, &lhs.primal, &rhs.primal);
         let spec = primal.spec();
         let tangent = match op {
@@ -161,21 +161,21 @@ pub(crate) fn jvp_binary(lhs: &Tensor, rhs: &Tensor, op: Operation) -> Option<Te
                     .add_instruction(Operation::Add, vec![lhs_term, rhs_term], spec.clone())
                     .var
             }
-            _ => panic!("jvp_binary does not support operation {:?}", op),
+            _ => panic!("linearize_binary does not support operation {:?}", op),
         };
         Tensor::from_jvp(primal, TracedTensor { var: tangent, spec })
     })
-    .expect("JVP tensors require an active linearize scope");
+    .expect("linearized tensors require an active linearize scope");
 
     Some(output)
 }
 
-pub(crate) fn jvp_unary(input: &Tensor, op: Operation) -> Option<Tensor> {
+pub(crate) fn linearize_unary(input: &Tensor, op: Operation) -> Option<Tensor> {
     let Some(jvp) = input.as_jvp() else {
         return None;
     };
 
-    let output = with_jvp_recorder(|recorder| {
+    let output = with_linearize_recorder(|recorder| {
         let primal = eager_unary(&op, &jvp.primal);
         let spec = primal.spec();
         let tangent = match op {
@@ -201,10 +201,25 @@ pub(crate) fn jvp_unary(input: &Tensor, op: Operation) -> Option<Tensor> {
                     )
                     .var
             }
-            Operation::Sum { axis, keepdim } => {
+            Operation::Sum { axes, keepdim } => {
                 recorder
                     .add_instruction(
-                        Operation::Sum { axis, keepdim },
+                        Operation::Sum {
+                            axes: axes.clone(),
+                            keepdim,
+                        },
+                        vec![jvp.tangent.var],
+                        spec.clone(),
+                    )
+                    .var
+            }
+            Operation::Mean { axes, keepdim } => {
+                recorder
+                    .add_instruction(
+                        Operation::Mean {
+                            axes: axes.clone(),
+                            keepdim,
+                        },
                         vec![jvp.tangent.var],
                         spec.clone(),
                     )
@@ -231,20 +246,13 @@ pub(crate) fn jvp_unary(input: &Tensor, op: Operation) -> Option<Tensor> {
                     .var;
                 recorder
                     .add_instruction(
-                        Operation::Sum { axis, keepdim },
+                        Operation::Sum {
+                            axes: vec![axis],
+                            keepdim,
+                        },
                         vec![weighted],
                         spec.clone(),
                     )
-                    .var
-            }
-            Operation::SumAll => {
-                recorder
-                    .add_instruction(Operation::SumAll, vec![jvp.tangent.var], spec.clone())
-                    .var
-            }
-            Operation::MeanAll => {
-                recorder
-                    .add_instruction(Operation::MeanAll, vec![jvp.tangent.var], spec.clone())
                     .var
             }
             Operation::Transpose { dim0, dim1 } => {
@@ -256,39 +264,39 @@ pub(crate) fn jvp_unary(input: &Tensor, op: Operation) -> Option<Tensor> {
                     )
                     .var
             }
-            _ => panic!("jvp_unary does not support operation {:?}", op),
+            _ => panic!("linearize_unary does not support operation {:?}", op),
         };
         Tensor::from_jvp(primal, TracedTensor { var: tangent, spec })
     })
-    .expect("JVP tensors require an active linearize scope");
+    .expect("linearized tensors require an active linearize scope");
 
     Some(output)
 }
 
 #[derive(Debug, Clone)]
-struct JvpOperand {
+struct LinearizeOperand {
     primal: DenseTensor,
     tangent: TracedTensor,
 }
 
 #[derive(Debug, Clone)]
-struct JvpRecorder {
+struct LinearizeRecorder {
     recorder: Recorder,
     tangent_input_specs: Vec<TensorSpec>,
     residuals: Vec<DenseTensor>,
 }
 
-impl JvpRecorder {
+impl LinearizeRecorder {
     fn new(primals: &[DenseTensor]) -> (Self, Vec<Tensor>) {
         let mut recorder = Recorder::new_empty();
-        let mut jvp_inputs = Vec::with_capacity(primals.len());
+        let mut inputs = Vec::with_capacity(primals.len());
         let mut tangent_input_specs = Vec::with_capacity(primals.len());
 
         for primal in primals {
             let spec = primal.spec();
             let tangent = recorder.add_input(spec.clone());
             tangent_input_specs.push(spec.clone());
-            jvp_inputs.push(Tensor::from_jvp(primal.clone(), tangent));
+            inputs.push(Tensor::from_jvp(primal.clone(), tangent));
         }
 
         (
@@ -297,7 +305,7 @@ impl JvpRecorder {
                 tangent_input_specs,
                 residuals: Vec::new(),
             },
-            jvp_inputs,
+            inputs,
         )
     }
 
@@ -346,17 +354,17 @@ impl JvpRecorder {
     }
 }
 
-fn jvp_operand(recorder: &mut JvpRecorder, tensor: &Tensor) -> JvpOperand {
+fn linearize_operand(recorder: &mut LinearizeRecorder, tensor: &Tensor) -> LinearizeOperand {
     match &tensor.inner {
         TensorInner::Concrete(primal) => {
             let spec = primal.spec();
             let zero = recorder.add_const_tensor(DenseTensor::zeros(spec.shape.clone()));
-            JvpOperand {
+            LinearizeOperand {
                 primal: primal.clone(),
                 tangent: TracedTensor { var: zero, spec },
             }
         }
-        TensorInner::Jvp(jvp) => JvpOperand {
+        TensorInner::Jvp(jvp) => LinearizeOperand {
             primal: jvp.primal.clone(),
             tangent: jvp.tangent.clone(),
         },
@@ -378,18 +386,17 @@ fn eager_unary(op: &Operation, input: &DenseTensor) -> DenseTensor {
     match op {
         Operation::Exp => unary_map(input, |x| x.exp()),
         Operation::Log => unary_map(input, |x| x.ln()),
-        Operation::Sum { axis, keepdim } => sum_axis(input, *axis, *keepdim),
+        Operation::Sum { axes, keepdim } => sum(input, axes, *keepdim),
+        Operation::Mean { axes, keepdim } => mean(input, axes, *keepdim),
         Operation::Max { axis, keepdim } => max_axis(input, *axis, *keepdim),
         Operation::Relu => relu(input),
-        Operation::SumAll => sum_all(input),
-        Operation::MeanAll => mean_all(input),
         Operation::Transpose { dim0, dim1 } => input.transpose(*dim0, *dim1),
         _ => panic!("eager_unary does not support operation {:?}", op),
     }
 }
 
-fn with_jvp_recorder<R>(f: impl FnOnce(&mut JvpRecorder) -> R) -> Option<R> {
-    JVP_STACK.with(|stack| {
+fn with_linearize_recorder<R>(f: impl FnOnce(&mut LinearizeRecorder) -> R) -> Option<R> {
+    LINEARIZE_STACK.with(|stack| {
         let mut stack = stack.borrow_mut();
         let recorder = stack.last_mut()?;
         Some(f(recorder))
@@ -397,29 +404,29 @@ fn with_jvp_recorder<R>(f: impl FnOnce(&mut JvpRecorder) -> R) -> Option<R> {
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-fn push_jvp_recorder(recorder: JvpRecorder) {
-    JVP_STACK.with(|stack| stack.borrow_mut().push(recorder));
+fn push_linearize_recorder(recorder: LinearizeRecorder) {
+    LINEARIZE_STACK.with(|stack| stack.borrow_mut().push(recorder));
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-fn pop_jvp_recorder() -> JvpRecorder {
-    JVP_STACK.with(|stack| {
+fn pop_linearize_recorder() -> LinearizeRecorder {
+    LINEARIZE_STACK.with(|stack| {
         stack
             .borrow_mut()
             .pop()
-            .expect("JVP recorder stack underflow")
+            .expect("linearize recorder stack underflow")
     })
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-fn clear_jvp_recorder_on_unwind() {
-    JVP_STACK.with(|stack| {
+fn clear_linearize_recorder_on_unwind() {
+    LINEARIZE_STACK.with(|stack| {
         let _ = stack.borrow_mut().pop();
     });
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-fn with_jvp_scope<F, T>(recorder: JvpRecorder, f: F) -> (JvpRecorder, T)
+fn with_linearize_scope<F, T>(recorder: LinearizeRecorder, f: F) -> (LinearizeRecorder, T)
 where
     F: FnOnce() -> T,
 {
@@ -428,15 +435,15 @@ where
     impl Drop for PopOnDrop {
         fn drop(&mut self) {
             if self.0 {
-                clear_jvp_recorder_on_unwind();
+                clear_linearize_recorder_on_unwind();
             }
         }
     }
 
-    push_jvp_recorder(recorder);
+    push_linearize_recorder(recorder);
     let mut guard = PopOnDrop(true);
     let out = f();
     guard.0 = false;
-    let recorder = pop_jvp_recorder();
+    let recorder = pop_linearize_recorder();
     (recorder, out)
 }

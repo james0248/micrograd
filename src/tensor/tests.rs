@@ -25,7 +25,7 @@ fn reduction_relu_and_matmul_outputs_are_contiguous() {
     let x = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).transpose(0, 1);
     let w = Tensor::from_vec(vec![1.0, 0.0, 0.0, 1.0], vec![2, 2]);
 
-    assert!(x.sum(1, true).expect_concrete("test").is_contiguous());
+    assert!(x.sum(&[1], true).expect_concrete("test").is_contiguous());
     assert!(x.max(1, false).expect_concrete("test").is_contiguous());
     assert!(x.relu().expect_concrete("test").is_contiguous());
     assert!(x.matmul(&w).expect_concrete("test").is_contiguous());

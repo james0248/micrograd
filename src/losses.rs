@@ -33,8 +33,8 @@ pub fn cross_entropy_with_logits(logits: &Tensor, targets: &[u8]) -> Tensor {
 
     let row_max = logits.max(1, true);
     let shifted = logits.sub(&row_max);
-    let lse = shifted.exp().sum(1, true).log();
+    let lse = shifted.exp().sum(&[1], true).log();
     let one_hot_t = Tensor::from_vec(one_hot, vec![batch, classes]);
-    let target_logits = shifted.mul(&one_hot_t).sum(1, true);
-    lse.sub(&target_logits).mean_all()
+    let target_logits = shifted.mul(&one_hot_t).sum(&[1], true);
+    lse.sub(&target_logits).mean(&[], false)
 }

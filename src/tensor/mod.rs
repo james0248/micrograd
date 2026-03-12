@@ -1,11 +1,12 @@
 mod dense;
 mod traced;
 
-use crate::autodiff::{Operation, jvp_binary, jvp_unary};
+use crate::autodiff::{Operation, linearize_binary, linearize_unary};
 
 pub(crate) use dense::{
     DenseTensor, elementwise_binary, expand_to_shape, matmul, matmul_shape, max_axis,
-    max_axis_weights, mean_all, relu, sum_all, sum_axis, sum_to_shape, unary_map,
+    max_axis_weights, mean, normalize_reduction_axes, reduction_size, relu, sum, sum_to_shape,
+    unary_map,
 };
 pub(crate) use traced::{JvpTensor, TensorSpec, TracedTensor, ValueId};
 
@@ -52,7 +53,7 @@ impl Tensor {
     }
 
     pub fn add(&self, other: &Tensor) -> Tensor {
-        if let Some(out) = jvp_binary(self, other, Operation::Add) {
+        if let Some(out) = linearize_binary(self, other, Operation::Add) {
             return out;
         }
         Tensor::from_concrete(elementwise_binary(
@@ -63,7 +64,7 @@ impl Tensor {
     }
 
     pub fn sub(&self, other: &Tensor) -> Tensor {
-        if let Some(out) = jvp_binary(self, other, Operation::Sub) {
+        if let Some(out) = linearize_binary(self, other, Operation::Sub) {
             return out;
         }
         Tensor::from_concrete(elementwise_binary(
@@ -74,7 +75,7 @@ impl Tensor {
     }
 
     pub fn mul(&self, other: &Tensor) -> Tensor {
-        if let Some(out) = jvp_binary(self, other, Operation::Mul) {
+        if let Some(out) = linearize_binary(self, other, Operation::Mul) {
             return out;
         }
         Tensor::from_concrete(elementwise_binary(
@@ -85,7 +86,7 @@ impl Tensor {
     }
 
     pub fn div(&self, other: &Tensor) -> Tensor {
-        if let Some(out) = jvp_binary(self, other, Operation::Div) {
+        if let Some(out) = linearize_binary(self, other, Operation::Div) {
             return out;
         }
         Tensor::from_concrete(elementwise_binary(
@@ -96,42 +97,63 @@ impl Tensor {
     }
 
     pub fn exp(&self) -> Tensor {
-        if let Some(out) = jvp_unary(self, Operation::Exp) {
+        if let Some(out) = linearize_unary(self, Operation::Exp) {
             return out;
         }
         Tensor::from_concrete(unary_map(self.expect_concrete("exp"), |x| x.exp()))
     }
 
     pub fn log(&self) -> Tensor {
-        if let Some(out) = jvp_unary(self, Operation::Log) {
+        if let Some(out) = linearize_unary(self, Operation::Log) {
             return out;
         }
         Tensor::from_concrete(unary_map(self.expect_concrete("log"), |x| x.ln()))
     }
 
     pub fn relu(&self) -> Tensor {
-        if let Some(out) = jvp_unary(self, Operation::Relu) {
+        if let Some(out) = linearize_unary(self, Operation::Relu) {
             return out;
         }
         Tensor::from_concrete(relu(self.expect_concrete("relu")))
     }
 
-    pub fn sum(&self, axis: usize, keepdim: bool) -> Tensor {
-        if let Some(out) = jvp_unary(self, Operation::Sum { axis, keepdim }) {
+    pub fn sum(&self, axes: &[usize], keepdim: bool) -> Tensor {
+        let axes = normalize_reduction_axes(self.shape(), axes);
+        if let Some(out) = linearize_unary(
+            self,
+            Operation::Sum {
+                axes: axes.clone(),
+                keepdim,
+            },
+        ) {
             return out;
         }
-        Tensor::from_concrete(sum_axis(self.expect_concrete("sum"), axis, keepdim))
+        Tensor::from_concrete(sum(self.expect_concrete("sum"), &axes, keepdim))
+    }
+
+    pub fn mean(&self, axes: &[usize], keepdim: bool) -> Tensor {
+        let axes = normalize_reduction_axes(self.shape(), axes);
+        if let Some(out) = linearize_unary(
+            self,
+            Operation::Mean {
+                axes: axes.clone(),
+                keepdim,
+            },
+        ) {
+            return out;
+        }
+        Tensor::from_concrete(mean(self.expect_concrete("mean"), &axes, keepdim))
     }
 
     pub fn max(&self, axis: usize, keepdim: bool) -> Tensor {
-        if let Some(out) = jvp_unary(self, Operation::Max { axis, keepdim }) {
+        if let Some(out) = linearize_unary(self, Operation::Max { axis, keepdim }) {
             return out;
         }
         Tensor::from_concrete(max_axis(self.expect_concrete("max"), axis, keepdim))
     }
 
     pub fn matmul(&self, other: &Tensor) -> Tensor {
-        if let Some(out) = jvp_binary(self, other, Operation::MatMul) {
+        if let Some(out) = linearize_binary(self, other, Operation::MatMul) {
             return out;
         }
         Tensor::from_concrete(matmul(
@@ -140,22 +162,8 @@ impl Tensor {
         ))
     }
 
-    pub fn sum_all(&self) -> Tensor {
-        if let Some(out) = jvp_unary(self, Operation::SumAll) {
-            return out;
-        }
-        Tensor::from_concrete(sum_all(self.expect_concrete("sum_all")))
-    }
-
-    pub fn mean_all(&self) -> Tensor {
-        if let Some(out) = jvp_unary(self, Operation::MeanAll) {
-            return out;
-        }
-        Tensor::from_concrete(mean_all(self.expect_concrete("mean_all")))
-    }
-
     pub fn transpose(&self, dim0: usize, dim1: usize) -> Tensor {
-        if let Some(out) = jvp_unary(self, Operation::Transpose { dim0, dim1 }) {
+        if let Some(out) = linearize_unary(self, Operation::Transpose { dim0, dim1 }) {
             return out;
         }
         Tensor::from_concrete(self.expect_concrete("transpose").transpose(dim0, dim1))

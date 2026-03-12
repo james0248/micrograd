@@ -170,7 +170,9 @@ pub fn run() -> Result<(), String> {
             let (loss, grads) = autodiff::value_and_grad(
                 |ps| {
                     let logits = model.forward_with_params(ps, &x);
-                    logits_cell.borrow_mut().replace((logits.to_vec(), logits.shape()[1]));
+                    logits_cell
+                        .borrow_mut()
+                        .replace((logits.to_vec(), logits.shape()[1]));
                     cross_entropy_with_logits(&logits, &yb)
                 },
                 &params,

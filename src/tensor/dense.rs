@@ -131,59 +131,74 @@ pub(crate) fn relu(input: &DenseTensor) -> DenseTensor {
     unary_map(input, |x| if x > 0.0 { x } else { 0.0 })
 }
 
-pub(crate) fn sum_all(input: &DenseTensor) -> DenseTensor {
-    let mut sum = 0.0;
-    for_each_index(&input.shape, |coords| {
-        sum += input.value_at(coords);
-    });
-    DenseTensor::from_vec(vec![sum], vec![1])
+pub(crate) fn normalize_reduction_axes(shape: &[usize], axes: &[usize]) -> Vec<usize> {
+    let rank = shape.len();
+    if axes.is_empty() {
+        return (0..rank).collect();
+    }
+
+    let mut normalized = axes.to_vec();
+    for &axis in &normalized {
+        assert!(
+            axis < rank,
+            "reduction axis out of bounds: axis={} for shape {:?}",
+            axis,
+            shape
+        );
+    }
+    normalized.sort_unstable();
+    for pair in normalized.windows(2) {
+        assert!(
+            pair[0] != pair[1],
+            "duplicate reduction axis {} for shape {:?}",
+            pair[0],
+            shape
+        );
+    }
+    normalized
 }
 
-pub(crate) fn mean_all(input: &DenseTensor) -> DenseTensor {
-    let total = numel(&input.shape);
-    assert!(
-        total > 0,
-        "mean_all requires a tensor with at least one element"
-    );
-    let mut sum = 0.0;
-    for_each_index(&input.shape, |coords| {
-        sum += input.value_at(coords);
-    });
-    DenseTensor::from_vec(vec![sum / total as f32], vec![1])
+pub(crate) fn sum(input: &DenseTensor, axes: &[usize], keepdim: bool) -> DenseTensor {
+    reduce_normalized(input, axes, keepdim, 0.0, |acc, x| acc + x)
 }
 
-fn reduce_axis(
+pub(crate) fn mean(input: &DenseTensor, axes: &[usize], keepdim: bool) -> DenseTensor {
+    let r = reduction_size(&input.shape, axes);
+    assert!(r > 0, "mean requires a tensor with at least one element");
+    let summed = reduce_normalized(input, axes, keepdim, 0.0, |acc, x| acc + x);
+    unary_map(&summed, |x| x / r as f32)
+}
+
+fn reduce_normalized(
     input: &DenseTensor,
-    axis: usize,
+    axes: &[usize],
     keepdim: bool,
     init: f32,
     combine: impl Fn(f32, f32) -> f32,
 ) -> DenseTensor {
-    let out_shape = reduced_shape(&input.shape, axis, keepdim);
+    let out_shape = reduced_shape_normalized(&input.shape, axes, keepdim);
     let out_strides = contiguous_strides(&out_shape);
     let mut out = vec![init; numel(&out_shape)];
 
     for_each_index(&input.shape, |coords| {
         let in_i = input.offset + offset_from_coords(coords, &input.strides);
         let out_i =
-            reduced_offset_from_input_coords(coords, &out_shape, &out_strides, axis, keepdim);
+            reduced_offset_from_input_coords(coords, &out_shape, &out_strides, axes, keepdim);
         out[out_i] = combine(out[out_i], input.storage[in_i]);
     });
 
     DenseTensor::from_vec(out, out_shape)
 }
 
-pub(crate) fn sum_axis(input: &DenseTensor, axis: usize, keepdim: bool) -> DenseTensor {
-    reduce_axis(input, axis, keepdim, 0.0, |acc, x| acc + x)
-}
-
 pub(crate) fn max_axis(input: &DenseTensor, axis: usize, keepdim: bool) -> DenseTensor {
-    reduce_axis(input, axis, keepdim, f32::NEG_INFINITY, f32::max)
+    let axes = normalize_reduction_axes(&input.shape, &[axis]);
+    reduce_normalized(input, &axes, keepdim, f32::NEG_INFINITY, f32::max)
 }
 
 pub(crate) fn max_axis_weights(input: &DenseTensor, axis: usize, keepdim: bool) -> DenseTensor {
+    let axes = normalize_reduction_axes(&input.shape, &[axis]);
     let maxima = max_axis(input, axis, keepdim);
-    let out_shape = reduced_shape(&input.shape, axis, keepdim);
+    let out_shape = reduced_shape_normalized(&input.shape, &axes, keepdim);
     let total = numel(&input.shape);
     let mut is_max = vec![false; total];
     let mut tie_counts = vec![0usize; numel(&out_shape)];
@@ -192,7 +207,7 @@ pub(crate) fn max_axis_weights(input: &DenseTensor, axis: usize, keepdim: bool) 
     for_each_index(&input.shape, |coords| {
         let input_i = input.offset + offset_from_coords(coords, &input.strides);
         let max_i =
-            reduced_offset_from_input_coords(coords, &out_shape, &maxima.strides, axis, keepdim);
+            reduced_offset_from_input_coords(coords, &out_shape, &maxima.strides, &axes, keepdim);
         if input.storage[input_i] == maxima.storage[maxima.offset + max_i] {
             is_max[idx] = true;
             tie_counts[max_i] += 1;
@@ -208,7 +223,7 @@ pub(crate) fn max_axis_weights(input: &DenseTensor, axis: usize, keepdim: bool) 
                 coords,
                 &out_shape,
                 &maxima.strides,
-                axis,
+                &axes,
                 keepdim,
             );
             weights.push(1.0 / tie_counts[max_i] as f32);
@@ -265,6 +280,10 @@ pub(crate) fn expand_to_shape(
     target_shape: &[usize],
     inserted_axes: &[usize],
 ) -> DenseTensor {
+    if input.shape == [1] && inserted_axes.len() == target_shape.len() {
+        return DenseTensor::filled(target_shape.to_vec(), input.storage[input.offset]);
+    }
+
     assert!(
         input.shape.len() + inserted_axes.len() == target_shape.len()
             || (input.shape.len() == target_shape.len() && inserted_axes.is_empty()),
@@ -521,25 +540,26 @@ pub(crate) fn broadcast_strides_for(
     out
 }
 
-pub(crate) fn reduced_shape(shape: &[usize], axis: usize, keepdim: bool) -> Vec<usize> {
-    assert!(
-        axis < shape.len(),
-        "axis out of bounds: axis={} for shape {:?}",
-        axis,
-        shape
-    );
-
+fn reduced_shape_normalized(shape: &[usize], axes: &[usize], keepdim: bool) -> Vec<usize> {
     if keepdim {
         let mut out = shape.to_vec();
-        out[axis] = 1;
+        for &axis in axes {
+            out[axis] = 1;
+        }
         out
-    } else if shape.len() == 1 {
+    } else if axes.len() == shape.len() {
         vec![1]
     } else {
         shape
             .iter()
             .enumerate()
-            .filter_map(|(i, &dim)| if i == axis { None } else { Some(dim) })
+            .filter_map(|(i, &dim)| {
+                if axes.binary_search(&i).is_ok() {
+                    None
+                } else {
+                    Some(dim)
+                }
+            })
             .collect()
     }
 }
@@ -548,17 +568,21 @@ pub(crate) fn reduced_offset_from_input_coords(
     input_coords: &[usize],
     output_shape: &[usize],
     output_strides: &[usize],
-    axis: usize,
+    axes: &[usize],
     keepdim: bool,
 ) -> usize {
-    if !keepdim && input_coords.len() == 1 {
+    if !keepdim && output_shape == [1] && axes.len() == input_coords.len() {
         return 0;
     }
 
     if keepdim {
         let mut off = 0usize;
         for i in 0..input_coords.len() {
-            let coord = if i == axis { 0 } else { input_coords[i] };
+            let coord = if axes.binary_search(&i).is_ok() {
+                0
+            } else {
+                input_coords[i]
+            };
             off += coord * output_strides[i];
         }
         off
@@ -566,7 +590,7 @@ pub(crate) fn reduced_offset_from_input_coords(
         let mut off = 0usize;
         let mut out_i = 0usize;
         for (in_i, &coord) in input_coords.iter().enumerate() {
-            if in_i == axis {
+            if axes.binary_search(&in_i).is_ok() {
                 continue;
             }
             off += coord * output_strides[out_i];
@@ -575,6 +599,10 @@ pub(crate) fn reduced_offset_from_input_coords(
         debug_assert_eq!(out_i, output_shape.len());
         off
     }
+}
+
+pub(crate) fn reduction_size(shape: &[usize], axes: &[usize]) -> usize {
+    axes.iter().map(|&axis| shape[axis]).product()
 }
 
 #[derive(Debug, Clone, Copy)]

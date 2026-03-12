@@ -68,19 +68,19 @@ fn random_tensor(rng: &mut Lcg, shape: &[usize], min: f32, max: f32) -> Tensor {
 
 fn eval_public_stress_case(case_id: usize, xs: &[Tensor]) -> Tensor {
     match case_id {
-        0 => xs[0].add(&xs[1]).sum_all(),
-        1 => xs[0].sub(&xs[1]).mean_all(),
-        2 => xs[0].mul(&xs[1]).sum_all(),
-        3 => xs[0].div(&xs[1]).mean_all(),
-        4 => xs[0].exp().add(&xs[1]).mean_all(),
-        5 => xs[0].log().add(&xs[1].log()).sum_all(),
-        6 => xs[0].mul(&xs[0]).add(&xs[1].exp()).mean_all(),
+        0 => xs[0].add(&xs[1]).sum(&[], false),
+        1 => xs[0].sub(&xs[1]).mean(&[], false),
+        2 => xs[0].mul(&xs[1]).sum(&[], false),
+        3 => xs[0].div(&xs[1]).mean(&[], false),
+        4 => xs[0].exp().add(&xs[1]).mean(&[], false),
+        5 => xs[0].log().add(&xs[1].log()).sum(&[], false),
+        6 => xs[0].mul(&xs[0]).add(&xs[1].exp()).mean(&[], false),
         7 => xs[0]
             .mul(&xs[0])
             .add(&xs[1].exp())
             .div(&xs[1])
             .log()
-            .mean_all(),
+            .mean(&[], false),
         _ => panic!("unknown public stress case {case_id}"),
     }
 }
@@ -113,24 +113,24 @@ fn eager_unary_and_reduction_ops_are_correct() {
     assert_vec_close(&log.to_vec(), &[1.0, 2.0], 1e-6);
 
     let y = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
-    assert_eq!(y.sum_all().shape(), vec![1]);
-    assert_vec_close(&y.sum_all().to_vec(), &[10.0], 1e-6);
-    assert_vec_close(&y.mean_all().to_vec(), &[2.5], 1e-6);
+    assert_eq!(y.sum(&[], false).shape(), vec![1]);
+    assert_vec_close(&y.sum(&[], false).to_vec(), &[10.0], 1e-6);
+    assert_vec_close(&y.mean(&[], false).to_vec(), &[2.5], 1e-6);
 }
 
 #[test]
 fn eager_axis_reductions_match_expected_shapes_and_values() {
     let x = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
 
-    let s_row_keep = x.sum(1, true);
+    let s_row_keep = x.sum(&[1], true);
     assert_eq!(s_row_keep.shape(), vec![2, 1]);
     assert_eq!(s_row_keep.to_vec(), vec![6.0, 15.0]);
 
-    let s_row = x.sum(1, false);
+    let s_row = x.sum(&[1], false);
     assert_eq!(s_row.shape(), vec![2]);
     assert_eq!(s_row.to_vec(), vec![6.0, 15.0]);
 
-    let s_col = x.sum(0, false);
+    let s_col = x.sum(&[0], false);
     assert_eq!(s_col.shape(), vec![3]);
     assert_eq!(s_col.to_vec(), vec![5.0, 7.0, 9.0]);
 
@@ -151,7 +151,7 @@ fn eager_axis_reductions_match_expected_shapes_and_values() {
 fn reductions_and_relu_work_on_transposed_views() {
     let x = Tensor::from_vec(vec![-1.0, 2.0, 3.0, -4.0, 5.0, 6.0], vec![2, 3]).transpose(0, 1);
 
-    assert_eq!(x.sum(1, false).to_vec(), vec![-5.0, 7.0, 9.0]);
+    assert_eq!(x.sum(&[1], false).to_vec(), vec![-5.0, 7.0, 9.0]);
     assert_eq!(x.max(1, false).to_vec(), vec![-1.0, 5.0, 6.0]);
     assert_eq!(x.relu().to_vec(), vec![0.0, 0.0, 2.0, 5.0, 3.0, 6.0]);
 }
@@ -204,14 +204,14 @@ fn transpose_composes_with_existing_ops() {
 
     assert_vec_close(&y.exp().log().to_vec(), &[1.0, 3.0, 2.0, 4.0], 1e-6);
     assert_vec_close(&y.add(&z).to_vec(), &[11.0, 33.0, 22.0, 44.0], 1e-6);
-    assert_vec_close(&y.sum_all().to_vec(), &[10.0], 1e-6);
-    assert_vec_close(&y.mean_all().to_vec(), &[2.5], 1e-6);
+    assert_vec_close(&y.sum(&[], false).to_vec(), &[10.0], 1e-6);
+    assert_vec_close(&y.mean(&[], false).to_vec(), &[2.5], 1e-6);
 }
 
 #[test]
 fn transpose_backward_maps_gradients_back_to_source_layout() {
     let x = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
-    let (value, grads) = autodiff::value_and_grad(|xs| xs[0].transpose(0, 1).sum_all(), &[x]);
+    let (value, grads) = autodiff::value_and_grad(|xs| xs[0].transpose(0, 1).sum(&[], false), &[x]);
 
     assert_vec_close(&value.to_vec(), &[10.0], 1e-6);
     assert_vec_close(&grads[0].to_vec(), &[1.0, 1.0, 1.0, 1.0], 1e-6);
@@ -223,7 +223,7 @@ fn to_vec_returns_primal_data_while_tracing() {
     let _ = autodiff::value_and_grad(
         |xs| {
             *captured.borrow_mut() = xs[0].to_vec();
-            xs[0].sum_all()
+            xs[0].sum(&[], false)
         },
         &[Tensor::from_vec(vec![1.0, 2.0], vec![2])],
     );
@@ -268,7 +268,7 @@ fn nonscalar_output_panics_with_explicit_error() {
 #[test]
 fn autodiff_broadcasted_add_matches_expected_gradients() {
     let (value, grads) = autodiff::value_and_grad(
-        |xs| xs[0].add(&xs[1]).sum_all(),
+        |xs| xs[0].add(&xs[1]).sum(&[], false),
         &[
             Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]),
             Tensor::from_vec(vec![10.0, 20.0], vec![2]),
@@ -283,7 +283,7 @@ fn autodiff_broadcasted_add_matches_expected_gradients() {
 #[test]
 fn relu_backward_matches_expected_mask() {
     let (value, grads) = autodiff::value_and_grad(
-        |xs| xs[0].relu().sum_all(),
+        |xs| xs[0].relu().sum(&[], false),
         &[Tensor::from_vec(vec![-1.0, 0.0, 2.0], vec![3])],
     );
 
@@ -294,7 +294,7 @@ fn relu_backward_matches_expected_mask() {
 #[test]
 fn sum_axis_backward_expands_back_to_input_shape() {
     let (value, grads) = autodiff::value_and_grad(
-        |xs| xs[0].sum(1, false).sum_all(),
+        |xs| xs[0].sum(&[1], false).sum(&[], false),
         &[Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2])],
     );
 
@@ -305,7 +305,7 @@ fn sum_axis_backward_expands_back_to_input_shape() {
 #[test]
 fn max_axis_backward_splits_ties_evenly() {
     let (value, grads) = autodiff::value_and_grad(
-        |xs| xs[0].max(1, false).sum_all(),
+        |xs| xs[0].max(1, false).sum(&[], false),
         &[Tensor::from_vec(vec![2.0, 2.0, 1.0], vec![1, 3])],
     );
 
@@ -314,9 +314,9 @@ fn max_axis_backward_splits_ties_evenly() {
 }
 
 #[test]
-fn matmul_sum_all_backward_matches_expected_gradients() {
+fn matmul_sum_backward_matches_expected_gradients() {
     let (value, grads) = autodiff::value_and_grad(
-        |xs| xs[0].matmul(&xs[1]).sum_all(),
+        |xs| xs[0].matmul(&xs[1]).sum(&[], false),
         &[
             Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]),
             Tensor::from_vec(vec![5.0, 6.0, 7.0, 8.0], vec![2, 2]),
@@ -334,7 +334,7 @@ fn batched_matmul_broadcast_backward_matches_finite_difference() {
         Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 1, 2]),
         Tensor::from_vec(vec![5.0, 6.0], vec![2, 1]),
     ];
-    let f = |xs: &[Tensor]| xs[0].matmul(&xs[1]).mean_all();
+    let f = |xs: &[Tensor]| xs[0].matmul(&xs[1]).mean(&[], false);
     let (_value, grads) = autodiff::value_and_grad(f, &inputs);
     let fd_x = finite_difference(f, &inputs, 0, 1e-3);
     let fd_y = finite_difference(f, &inputs, 1, 1e-3);
@@ -346,7 +346,7 @@ fn batched_matmul_broadcast_backward_matches_finite_difference() {
 #[test]
 fn add_grad_returns_ones_for_both_inputs() {
     let grads = autodiff::grad(
-        |xs| xs[0].add(&xs[1]).sum_all(),
+        |xs| xs[0].add(&xs[1]).sum(&[], false),
         &[
             Tensor::from_vec(vec![1.0, 2.0], vec![2]),
             Tensor::from_vec(vec![3.0, 4.0], vec![2]),
@@ -361,7 +361,7 @@ fn add_grad_returns_ones_for_both_inputs() {
 #[test]
 fn sub_grad_negates_rhs() {
     let grads = autodiff::grad(
-        |xs| xs[0].sub(&xs[1]).sum_all(),
+        |xs| xs[0].sub(&xs[1]).sum(&[], false),
         &[
             Tensor::from_vec(vec![4.0, 5.0], vec![2]),
             Tensor::from_vec(vec![1.5, 2.5], vec![2]),
@@ -376,7 +376,7 @@ fn sub_grad_negates_rhs() {
 fn mul_grad_matches_other_operand() {
     let x = Tensor::from_vec(vec![1.0, 2.0], vec![2]);
     let y = Tensor::from_vec(vec![3.0, 4.0], vec![2]);
-    let grads = autodiff::grad(|xs| xs[0].mul(&xs[1]).sum_all(), &[x, y]);
+    let grads = autodiff::grad(|xs| xs[0].mul(&xs[1]).sum(&[], false), &[x, y]);
 
     assert_vec_close(&grads[0].to_vec(), &[3.0, 4.0], 1e-6);
     assert_vec_close(&grads[1].to_vec(), &[1.0, 2.0], 1e-6);
@@ -386,7 +386,7 @@ fn mul_grad_matches_other_operand() {
 fn div_grad_matches_analytic_result() {
     let x = Tensor::from_vec(vec![2.0, 6.0], vec![2]);
     let y = Tensor::from_vec(vec![4.0, 3.0], vec![2]);
-    let grads = autodiff::grad(|xs| xs[0].div(&xs[1]).sum_all(), &[x, y]);
+    let grads = autodiff::grad(|xs| xs[0].div(&xs[1]).sum(&[], false), &[x, y]);
 
     assert_vec_close(&grads[0].to_vec(), &[0.25, 1.0 / 3.0], 1e-6);
     assert_vec_close(&grads[1].to_vec(), &[-0.125, -2.0 / 3.0], 1e-6);
@@ -395,7 +395,7 @@ fn div_grad_matches_analytic_result() {
 #[test]
 fn exp_grad_matches_exp_output() {
     let x = Tensor::from_vec(vec![0.0, 1.0], vec![2]);
-    let (value, grads) = autodiff::value_and_grad(|xs| xs[0].exp().sum_all(), &[x]);
+    let (value, grads) = autodiff::value_and_grad(|xs| xs[0].exp().sum(&[], false), &[x]);
 
     assert_vec_close(&value.to_vec(), &[1.0 + 1.0f32.exp()], 1e-6);
     assert_vec_close(&grads[0].to_vec(), &[1.0, 1.0f32.exp()], 1e-6);
@@ -404,7 +404,7 @@ fn exp_grad_matches_exp_output() {
 #[test]
 fn log_grad_is_reciprocal() {
     let grads = autodiff::grad(
-        |xs| xs[0].log().sum_all(),
+        |xs| xs[0].log().sum(&[], false),
         &[Tensor::from_vec(vec![2.0, 4.0], vec![2])],
     );
 
@@ -412,9 +412,9 @@ fn log_grad_is_reciprocal() {
 }
 
 #[test]
-fn mean_all_grad_scales_by_numel() {
+fn mean_grad_scales_by_numel() {
     let grads = autodiff::grad(
-        |xs| xs[0].mean_all(),
+        |xs| xs[0].mean(&[], false),
         &[Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2])],
     );
 
@@ -424,7 +424,7 @@ fn mean_all_grad_scales_by_numel() {
 #[test]
 fn reused_input_accumulates_cotangents() {
     let grads = autodiff::grad(
-        |xs| xs[0].mul(&xs[0]).sum_all(),
+        |xs| xs[0].mul(&xs[0]).sum(&[], false),
         &[Tensor::from_vec(vec![2.0, 3.0], vec![2])],
     );
 
@@ -465,7 +465,7 @@ fn finite_difference_matches_value_and_grad_on_composite_function() {
         Tensor::from_vec(vec![1.2, 0.7], vec![2]),
         Tensor::from_vec(vec![2.0, 1.5], vec![2]),
     ];
-    let f = |xs: &[Tensor]| xs[0].mul(&xs[0]).add(&xs[1]).log().mean_all();
+    let f = |xs: &[Tensor]| xs[0].mul(&xs[0]).add(&xs[1]).log().mean(&[], false);
     let (_value, grads) = autodiff::value_and_grad(f, &inputs);
 
     let fd_x = finite_difference(f, &inputs, 0, 1e-3);
@@ -509,10 +509,10 @@ fn randomized_finite_difference_matches_public_autodiff_on_composite_suite() {
             ];
 
             let f = |xs: &[Tensor]| match case_id {
-                0 => xs[0].mul(&xs[0]).add(&xs[1]).log().mean_all(),
-                1 => xs[0].div(&xs[1]).add(&xs[1].exp()).mean_all(),
-                2 => xs[0].log().mul(&xs[1]).sum_all(),
-                3 => xs[0].exp().add(&xs[1].log()).mean_all(),
+                0 => xs[0].mul(&xs[0]).add(&xs[1]).log().mean(&[], false),
+                1 => xs[0].div(&xs[1]).add(&xs[1].exp()).mean(&[], false),
+                2 => xs[0].log().mul(&xs[1]).sum(&[], false),
+                3 => xs[0].exp().add(&xs[1].log()).mean(&[], false),
                 _ => panic!("unknown finite-difference stress case {case_id}"),
             };
 
@@ -549,9 +549,9 @@ fn randomized_finite_difference_matches_public_autodiff_on_batched_suite() {
             };
 
             let f = |xs: &[Tensor]| match case_id {
-                0 => xs[0].add(&xs[1]).sum(1, false).mean_all(),
-                1 => xs[0].mul(&xs[1]).relu().mean_all(),
-                2 => xs[0].matmul(&xs[1]).sum(1, false).mean_all(),
+                0 => xs[0].add(&xs[1]).sum(&[1], false).mean(&[], false),
+                1 => xs[0].mul(&xs[1]).relu().mean(&[], false),
+                2 => xs[0].matmul(&xs[1]).sum(&[1], false).mean(&[], false),
                 _ => unreachable!(),
             };
 
