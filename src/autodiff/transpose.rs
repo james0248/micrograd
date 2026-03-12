@@ -246,6 +246,30 @@ pub(crate) fn transpose_linearized(linearized: &Linearized) -> Pullback {
                     );
                 }
             }
+            Operation::Transpose { dim0, dim1 } => {
+                if depends_on_tangent[instruction.inputs[0]] {
+                    let input_spec = specs[instruction.inputs[0]]
+                        .as_ref()
+                        .expect("transpose input spec must exist");
+                    let d_input = recorder
+                        .add_instruction(
+                            Operation::Transpose {
+                                dim0: *dim0,
+                                dim1: *dim1,
+                            },
+                            vec![out_cotangent],
+                            input_spec.clone(),
+                        )
+                        .var;
+                    accumulate_cotangent(
+                        &mut recorder,
+                        &mut cotangents,
+                        instruction.inputs[0],
+                        d_input,
+                        input_spec,
+                    );
+                }
+            }
             Operation::ExpandScalar { .. } => {
                 unreachable!("validated by tangent_dependency_table")
             }
@@ -330,7 +354,9 @@ fn tangent_dependency_table(linearized: &Linearized) -> Vec<bool> {
                     instruction.op
                 )
             }
-            Operation::SumAll | Operation::MeanAll => depends_on_tangent[instruction.inputs[0]],
+            Operation::SumAll | Operation::MeanAll | Operation::Transpose { .. } => {
+                depends_on_tangent[instruction.inputs[0]]
+            }
             Operation::ExpandScalar { .. } => {
                 panic!(
                     "ExpandScalar is an internal backward op and must not appear in linearized traces"

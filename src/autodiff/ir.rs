@@ -10,6 +10,7 @@ pub(crate) enum Operation {
     Log,
     SumAll,
     MeanAll,
+    Transpose { dim0: usize, dim1: usize },
     ExpandScalar { shape: Vec<usize> },
 }
 

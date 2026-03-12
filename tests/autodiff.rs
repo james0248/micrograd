@@ -129,51 +129,207 @@ fn eval_legacy_stress_case(case_id: usize, xs: &[EngineTensor]) -> EngineTensor 
 }
 
 #[test]
-fn tensor_from_vec_keeps_shape_and_data() {
+fn tensor_from_vec_keeps_shape_and_values() {
     let x = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
     assert_eq!(x.shape(), vec![2, 2]);
-    assert_eq!(x.data(), vec![1.0, 2.0, 3.0, 4.0]);
+    assert_eq!(x.to_vec(), vec![1.0, 2.0, 3.0, 4.0]);
 }
 
 #[test]
-fn eager_elementwise_ops_require_same_shapes() {
-    let x = Tensor::from_vec(vec![1.0, 2.0], vec![2]);
-    let y = Tensor::from_vec(vec![3.0, 4.0], vec![2]);
+fn eager_elementwise_ops_support_broadcasting() {
+    let x = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+    let y = Tensor::from_vec(vec![10.0, 20.0], vec![2]);
 
-    assert_eq!(x.add(&y).data(), vec![4.0, 6.0]);
-    assert_eq!(x.sub(&y).data(), vec![-2.0, -2.0]);
-    assert_eq!(x.mul(&y).data(), vec![3.0, 8.0]);
-    assert_eq!(y.div(&x).data(), vec![3.0, 2.0]);
+    assert_eq!(x.add(&y).to_vec(), vec![11.0, 22.0, 13.0, 24.0]);
+    assert_eq!(x.sub(&y).to_vec(), vec![-9.0, -18.0, -7.0, -16.0]);
+    assert_eq!(x.mul(&y).to_vec(), vec![10.0, 40.0, 30.0, 80.0]);
+    assert_eq!(x.div(&y).to_vec(), vec![0.1, 0.1, 0.3, 0.2]);
 }
 
 #[test]
 fn eager_unary_and_reduction_ops_are_correct() {
     let x = Tensor::from_vec(vec![1.0, 2.0], vec![2]);
     let exp = x.exp();
-    assert_vec_close(&exp.data(), &[1.0f32.exp(), 2.0f32.exp()], 1e-6);
+    assert_vec_close(&exp.to_vec(), &[1.0f32.exp(), 2.0f32.exp()], 1e-6);
 
     let log = exp.log();
-    assert_vec_close(&log.data(), &[1.0, 2.0], 1e-6);
+    assert_vec_close(&log.to_vec(), &[1.0, 2.0], 1e-6);
 
     let y = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
     assert_eq!(y.sum_all().shape(), vec![1]);
-    assert_vec_close(&y.sum_all().data(), &[10.0], 1e-6);
-    assert_vec_close(&y.mean_all().data(), &[2.5], 1e-6);
+    assert_vec_close(&y.sum_all().to_vec(), &[10.0], 1e-6);
+    assert_vec_close(&y.mean_all().to_vec(), &[2.5], 1e-6);
 }
 
 #[test]
-fn shape_mismatch_panics_with_explicit_error() {
+fn eager_axis_reductions_match_expected_shapes_and_values() {
+    let x = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
+
+    let s_row_keep = x.sum(1, true);
+    assert_eq!(s_row_keep.shape(), vec![2, 1]);
+    assert_eq!(s_row_keep.to_vec(), vec![6.0, 15.0]);
+
+    let s_row = x.sum(1, false);
+    assert_eq!(s_row.shape(), vec![2]);
+    assert_eq!(s_row.to_vec(), vec![6.0, 15.0]);
+
+    let s_col = x.sum(0, false);
+    assert_eq!(s_col.shape(), vec![3]);
+    assert_eq!(s_col.to_vec(), vec![5.0, 7.0, 9.0]);
+
+    let m_row_keep = x.max(1, true);
+    assert_eq!(m_row_keep.shape(), vec![2, 1]);
+    assert_eq!(m_row_keep.to_vec(), vec![3.0, 6.0]);
+
+    let m_row = x.max(1, false);
+    assert_eq!(m_row.shape(), vec![2]);
+    assert_eq!(m_row.to_vec(), vec![3.0, 6.0]);
+
+    let m_col = x.max(0, false);
+    assert_eq!(m_col.shape(), vec![3]);
+    assert_eq!(m_col.to_vec(), vec![4.0, 5.0, 6.0]);
+}
+
+#[test]
+fn reductions_and_relu_work_on_transposed_views() {
+    let x = Tensor::from_vec(vec![-1.0, 2.0, 3.0, -4.0, 5.0, 6.0], vec![2, 3]).transpose(0, 1);
+
+    assert_eq!(x.sum(1, false).to_vec(), vec![-5.0, 7.0, 9.0]);
+    assert_eq!(x.max(1, false).to_vec(), vec![-1.0, 5.0, 6.0]);
+    assert_eq!(x.relu().to_vec(), vec![0.0, 0.0, 2.0, 5.0, 3.0, 6.0]);
+}
+
+#[test]
+fn matmul_supports_rectangular_transposed_and_batched_inputs() {
+    let x = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
+    let w = Tensor::from_vec(vec![1.0, 2.0, 0.0, 1.0, 2.0, 3.0], vec![3, 2]);
+    let y = x.matmul(&w);
+    assert_eq!(y.shape(), vec![2, 2]);
+    assert_eq!(y.to_vec(), vec![7.0, 13.0, 16.0, 31.0]);
+
+    let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
+    let b = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+    let out = a.transpose(0, 1).matmul(&b);
+    assert_eq!(out.shape(), vec![3, 2]);
+    assert_eq!(out.to_vec(), vec![13.0, 18.0, 17.0, 24.0, 21.0, 30.0]);
+
+    let batch_a = Tensor::from_vec(
+        vec![
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, //
+            7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+        ],
+        vec![2, 2, 3],
+    );
+    let batch_b = Tensor::from_vec(vec![1.0, 0.0, 0.0, 1.0, 1.0, 1.0], vec![1, 3, 2]);
+    let batch_out = batch_a.matmul(&batch_b);
+    assert_eq!(batch_out.shape(), vec![2, 2, 2]);
+    assert_eq!(
+        batch_out.to_vec(),
+        vec![4.0, 5.0, 10.0, 11.0, 16.0, 17.0, 22.0, 23.0]
+    );
+}
+
+#[test]
+fn stage2_forward_ops_match_legacy_engine_on_overlapping_behavior() {
+    engine::reset_state();
+
+    let legacy_a = EngineTensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
+    let legacy_b = EngineTensor::from_vec(vec![10.0, 20.0, 30.0], vec![3]);
+    let legacy_add = legacy_a.add(&legacy_b);
+    let legacy_sum = legacy_a.transpose(0, 1).sum(1, false);
+    let legacy_max = legacy_a.transpose(0, 1).max(1, false);
+    let legacy_relu = EngineTensor::from_vec(vec![-1.0, 2.0, -3.0, 4.0], vec![2, 2]).relu();
+    let legacy_matmul = legacy_a.transpose(0, 1).matmul(&EngineTensor::from_vec(
+        vec![1.0, 2.0, 3.0, 4.0],
+        vec![2, 2],
+    ));
+
+    let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
+    let b = Tensor::from_vec(vec![10.0, 20.0, 30.0], vec![3]);
+    let add = a.add(&b);
+    let sum = a.transpose(0, 1).sum(1, false);
+    let max = a.transpose(0, 1).max(1, false);
+    let relu = Tensor::from_vec(vec![-1.0, 2.0, -3.0, 4.0], vec![2, 2]).relu();
+    let matmul = a
+        .transpose(0, 1)
+        .matmul(&Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]));
+
+    assert_vec_close(&add.to_vec(), &legacy_add.data(), 1e-6);
+    assert_vec_close(&sum.to_vec(), &legacy_sum.data(), 1e-6);
+    assert_vec_close(&max.to_vec(), &legacy_max.data(), 1e-6);
+    assert_vec_close(&relu.to_vec(), &legacy_relu.data(), 1e-6);
+    assert_vec_close(&matmul.to_vec(), &legacy_matmul.data(), 1e-6);
+}
+
+#[test]
+fn transpose_is_a_view_and_to_vec_materializes_logical_order() {
+    let x = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
+    let xt = x.transpose(0, 1);
+
+    assert_eq!(xt.shape(), vec![3, 2]);
+    assert_eq!(xt.to_vec(), vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+    assert_eq!(x.to_vec(), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+}
+
+#[test]
+fn transpose_composes_with_existing_ops() {
+    let x = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+    let y = x.transpose(0, 1);
+    let z = Tensor::from_vec(vec![10.0, 20.0, 30.0, 40.0], vec![2, 2]).transpose(0, 1);
+
+    assert_vec_close(&y.exp().log().to_vec(), &[1.0, 3.0, 2.0, 4.0], 1e-6);
+    assert_vec_close(&y.add(&z).to_vec(), &[11.0, 33.0, 22.0, 44.0], 1e-6);
+    assert_vec_close(&y.sum_all().to_vec(), &[10.0], 1e-6);
+    assert_vec_close(&y.mean_all().to_vec(), &[2.5], 1e-6);
+}
+
+#[test]
+fn transpose_backward_matches_legacy_engine() {
+    let x = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+    let (new_value, grads) = autodiff::value_and_grad(|xs| xs[0].transpose(0, 1).sum_all(), &[x]);
+
+    let (legacy_value, legacy_grads) =
+        legacy_value_and_grad(&[(&[1.0, 2.0, 3.0, 4.0], &[2, 2])], |xs| {
+            legacy_sum_all(xs[0].transpose(0, 1))
+        });
+
+    assert_vec_close(&new_value.to_vec(), &legacy_value, 1e-6);
+    assert_vec_close(&grads[0].to_vec(), &legacy_grads[0], 1e-6);
+}
+
+#[test]
+fn to_vec_panics_while_tracing() {
     let result = std::panic::catch_unwind(|| {
         let _ = autodiff::value_and_grad(
-            |xs| xs[0].add(&xs[1]).sum_all(),
-            &[
-                Tensor::from_vec(vec![1.0, 2.0], vec![2]),
-                Tensor::from_vec(vec![1.0], vec![1]),
-            ],
+            |xs| {
+                let _ = xs[0].to_vec();
+                xs[0].sum_all()
+            },
+            &[Tensor::from_vec(vec![1.0, 2.0], vec![2])],
         );
     });
+    let msg = panic_message(result.expect_err("expected to_vec panic while tracing"));
+    assert!(msg.contains("Tensor::to_vec() is unavailable while tracing"));
+}
+
+#[test]
+fn invalid_transpose_dims_panic() {
+    let result = std::panic::catch_unwind(|| {
+        let x = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+        let _ = x.transpose(0, 2);
+    });
+    let msg = panic_message(result.expect_err("expected invalid transpose panic"));
+    assert!(msg.contains("transpose dims out of bounds"));
+}
+
+#[test]
+fn incompatible_broadcast_panics_with_explicit_error() {
+    let result = std::panic::catch_unwind(|| {
+        let _ = Tensor::from_vec(vec![1.0, 2.0], vec![2])
+            .add(&Tensor::from_vec(vec![1.0, 2.0, 3.0], vec![3]));
+    });
     let msg = panic_message(result.expect_err("expected shape mismatch panic"));
-    assert!(msg.contains("same-shape elementwise op"));
+    assert!(msg.contains("broadcast shape mismatch"));
 }
 
 #[test]
@@ -192,6 +348,71 @@ fn nonscalar_output_panics_with_explicit_error() {
 }
 
 #[test]
+fn autodiff_rejects_broadcasted_add_until_broadcast_gradients_exist() {
+    let result = std::panic::catch_unwind(|| {
+        let _ = autodiff::value_and_grad(
+            |xs| xs[0].add(&xs[1]).sum_all(),
+            &[
+                Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]),
+                Tensor::from_vec(vec![10.0, 20.0], vec![2]),
+            ],
+        );
+    });
+    let msg = panic_message(result.expect_err("expected broadcast autodiff panic"));
+    assert!(msg.contains("autodiff does not support broadcasted add yet"));
+}
+
+#[test]
+fn autodiff_rejects_stage2_forward_ops_until_stage4() {
+    let relu = std::panic::catch_unwind(|| {
+        let _ = autodiff::value_and_grad(
+            |xs| xs[0].relu().sum_all(),
+            &[Tensor::from_vec(vec![-1.0, 2.0], vec![2])],
+        );
+    });
+    assert!(
+        panic_message(relu.expect_err("expected relu autodiff panic"))
+            .contains("autodiff does not support relu yet")
+    );
+
+    let sum = std::panic::catch_unwind(|| {
+        let _ = autodiff::value_and_grad(
+            |xs| xs[0].sum(1, false).sum_all(),
+            &[Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2])],
+        );
+    });
+    assert!(
+        panic_message(sum.expect_err("expected sum autodiff panic"))
+            .contains("autodiff does not support sum yet")
+    );
+
+    let max = std::panic::catch_unwind(|| {
+        let _ = autodiff::value_and_grad(
+            |xs| xs[0].max(1, false).sum_all(),
+            &[Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2])],
+        );
+    });
+    assert!(
+        panic_message(max.expect_err("expected max autodiff panic"))
+            .contains("autodiff does not support max yet")
+    );
+
+    let matmul = std::panic::catch_unwind(|| {
+        let _ = autodiff::value_and_grad(
+            |xs| xs[0].matmul(&xs[1]).sum_all(),
+            &[
+                Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]),
+                Tensor::from_vec(vec![5.0, 6.0, 7.0, 8.0], vec![2, 2]),
+            ],
+        );
+    });
+    assert!(
+        panic_message(matmul.expect_err("expected matmul autodiff panic"))
+            .contains("autodiff does not support matmul yet")
+    );
+}
+
+#[test]
 fn add_grad_returns_ones_for_both_inputs() {
     let grads = autodiff::grad(
         |xs| xs[0].add(&xs[1]).sum_all(),
@@ -202,8 +423,8 @@ fn add_grad_returns_ones_for_both_inputs() {
     );
 
     assert_eq!(grads.len(), 2);
-    assert_vec_close(&grads[0].data(), &[1.0, 1.0], 1e-6);
-    assert_vec_close(&grads[1].data(), &[1.0, 1.0], 1e-6);
+    assert_vec_close(&grads[0].to_vec(), &[1.0, 1.0], 1e-6);
+    assert_vec_close(&grads[1].to_vec(), &[1.0, 1.0], 1e-6);
 }
 
 #[test]
@@ -216,8 +437,8 @@ fn sub_grad_negates_rhs() {
         ],
     );
 
-    assert_vec_close(&grads[0].data(), &[1.0, 1.0], 1e-6);
-    assert_vec_close(&grads[1].data(), &[-1.0, -1.0], 1e-6);
+    assert_vec_close(&grads[0].to_vec(), &[1.0, 1.0], 1e-6);
+    assert_vec_close(&grads[1].to_vec(), &[-1.0, -1.0], 1e-6);
 }
 
 #[test]
@@ -226,8 +447,8 @@ fn mul_grad_matches_other_operand() {
     let y = Tensor::from_vec(vec![3.0, 4.0], vec![2]);
     let grads = autodiff::grad(|xs| xs[0].mul(&xs[1]).sum_all(), &[x, y]);
 
-    assert_vec_close(&grads[0].data(), &[3.0, 4.0], 1e-6);
-    assert_vec_close(&grads[1].data(), &[1.0, 2.0], 1e-6);
+    assert_vec_close(&grads[0].to_vec(), &[3.0, 4.0], 1e-6);
+    assert_vec_close(&grads[1].to_vec(), &[1.0, 2.0], 1e-6);
 }
 
 #[test]
@@ -236,8 +457,8 @@ fn div_grad_matches_analytic_result() {
     let y = Tensor::from_vec(vec![4.0, 3.0], vec![2]);
     let grads = autodiff::grad(|xs| xs[0].div(&xs[1]).sum_all(), &[x, y]);
 
-    assert_vec_close(&grads[0].data(), &[0.25, 1.0 / 3.0], 1e-6);
-    assert_vec_close(&grads[1].data(), &[-0.125, -2.0 / 3.0], 1e-6);
+    assert_vec_close(&grads[0].to_vec(), &[0.25, 1.0 / 3.0], 1e-6);
+    assert_vec_close(&grads[1].to_vec(), &[-0.125, -2.0 / 3.0], 1e-6);
 }
 
 #[test]
@@ -245,8 +466,8 @@ fn exp_grad_matches_exp_output() {
     let x = Tensor::from_vec(vec![0.0, 1.0], vec![2]);
     let (value, grads) = autodiff::value_and_grad(|xs| xs[0].exp().sum_all(), &[x]);
 
-    assert_vec_close(&value.data(), &[1.0 + 1.0f32.exp()], 1e-6);
-    assert_vec_close(&grads[0].data(), &[1.0, 1.0f32.exp()], 1e-6);
+    assert_vec_close(&value.to_vec(), &[1.0 + 1.0f32.exp()], 1e-6);
+    assert_vec_close(&grads[0].to_vec(), &[1.0, 1.0f32.exp()], 1e-6);
 }
 
 #[test]
@@ -256,7 +477,7 @@ fn log_grad_is_reciprocal() {
         &[Tensor::from_vec(vec![2.0, 4.0], vec![2])],
     );
 
-    assert_vec_close(&grads[0].data(), &[0.5, 0.25], 1e-6);
+    assert_vec_close(&grads[0].to_vec(), &[0.5, 0.25], 1e-6);
 }
 
 #[test]
@@ -266,7 +487,7 @@ fn mean_all_grad_scales_by_numel() {
         &[Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2])],
     );
 
-    assert_vec_close(&grads[0].data(), &[0.25, 0.25, 0.25, 0.25], 1e-6);
+    assert_vec_close(&grads[0].to_vec(), &[0.25, 0.25, 0.25, 0.25], 1e-6);
 }
 
 #[test]
@@ -276,7 +497,7 @@ fn reused_input_accumulates_cotangents() {
         &[Tensor::from_vec(vec![2.0, 3.0], vec![2])],
     );
 
-    assert_vec_close(&grads[0].data(), &[4.0, 6.0], 1e-6);
+    assert_vec_close(&grads[0].to_vec(), &[4.0, 6.0], 1e-6);
 }
 
 fn finite_difference<F>(f: F, inputs: &[Tensor], input_index: usize, eps: f32) -> Vec<f32>
@@ -285,22 +506,22 @@ where
 {
     let mut out = Vec::new();
     let base_inputs: Vec<Tensor> = inputs.to_vec();
-    let target = base_inputs[input_index].data();
+    let target = base_inputs[input_index].to_vec();
     let shape = base_inputs[input_index].shape();
 
     for idx in 0..target.len() {
-        let mut plus_data = base_inputs[input_index].data().to_vec();
+        let mut plus_data = base_inputs[input_index].to_vec();
         plus_data[idx] += eps;
         let mut plus_inputs = base_inputs.clone();
         plus_inputs[input_index] = Tensor::from_vec(plus_data, shape.to_vec());
 
-        let mut minus_data = base_inputs[input_index].data().to_vec();
+        let mut minus_data = base_inputs[input_index].to_vec();
         minus_data[idx] -= eps;
         let mut minus_inputs = base_inputs.clone();
         minus_inputs[input_index] = Tensor::from_vec(minus_data, shape.to_vec());
 
-        let plus = f(&plus_inputs).data()[0];
-        let minus = f(&minus_inputs).data()[0];
+        let plus = f(&plus_inputs).to_vec()[0];
+        let minus = f(&minus_inputs).to_vec()[0];
         out.push((plus - minus) / (2.0 * eps));
     }
 
@@ -319,8 +540,8 @@ fn finite_difference_matches_value_and_grad_on_composite_function() {
     let fd_x = finite_difference(f, &inputs, 0, 1e-3);
     let fd_y = finite_difference(f, &inputs, 1, 1e-3);
 
-    assert_vec_close(&grads[0].data(), &fd_x, 2e-3);
-    assert_vec_close(&grads[1].data(), &fd_y, 2e-3);
+    assert_vec_close(&grads[0].to_vec(), &fd_x, 2e-3);
+    assert_vec_close(&grads[1].to_vec(), &fd_y, 2e-3);
 }
 
 #[test]
@@ -338,10 +559,10 @@ fn autodiff_matches_tape_engine_on_binary_mean_composition() {
     let (legacy_value, legacy_grads) =
         legacy_value_and_grad(&input_specs, |xs| xs[0].add(&xs[1]).sub(&xs[1]).mean());
 
-    assert_vec_close(new_value.data(), &legacy_value, 1e-6);
+    assert_vec_close(&new_value.to_vec(), &legacy_value, 1e-6);
     assert_eq!(new_grads.len(), legacy_grads.len());
     for (actual, expected) in new_grads.iter().zip(legacy_grads.iter()) {
-        assert_vec_close(actual.data(), expected, 1e-6);
+        assert_vec_close(&actual.to_vec(), expected, 1e-6);
     }
 }
 
@@ -361,10 +582,10 @@ fn autodiff_matches_tape_engine_on_mul_div_log_mean_composition() {
         xs[0].mul(&xs[0]).add(&xs[1]).div(&xs[1]).log().mean()
     });
 
-    assert_vec_close(new_value.data(), &legacy_value, 1e-6);
+    assert_vec_close(&new_value.to_vec(), &legacy_value, 1e-6);
     assert_eq!(new_grads.len(), legacy_grads.len());
     for (actual, expected) in new_grads.iter().zip(legacy_grads.iter()) {
-        assert_vec_close(actual.data(), expected, 1e-6);
+        assert_vec_close(&actual.to_vec(), expected, 1e-6);
     }
 }
 
@@ -381,10 +602,10 @@ fn autodiff_matches_tape_engine_on_exp_and_reused_input_gradients() {
         xs[0].exp().add(&xs[0].mul(&xs[0])).mean()
     });
 
-    assert_vec_close(new_value.data(), &legacy_value, 1e-6);
+    assert_vec_close(&new_value.to_vec(), &legacy_value, 1e-6);
     assert_eq!(new_grads.len(), legacy_grads.len());
     for (actual, expected) in new_grads.iter().zip(legacy_grads.iter()) {
-        assert_vec_close(actual.data(), expected, 1e-6);
+        assert_vec_close(&actual.to_vec(), expected, 1e-6);
     }
 }
 
@@ -398,10 +619,10 @@ fn autodiff_matches_tape_engine_on_sum_all_for_matrix_input() {
     let (legacy_value, legacy_grads) =
         legacy_value_and_grad(&input_specs, |xs| legacy_sum_all(xs[0].mul(&xs[0])));
 
-    assert_vec_close(new_value.data(), &legacy_value, 1e-6);
+    assert_vec_close(&new_value.to_vec(), &legacy_value, 1e-6);
     assert_eq!(new_grads.len(), legacy_grads.len());
     for (actual, expected) in new_grads.iter().zip(legacy_grads.iter()) {
-        assert_vec_close(actual.data(), expected, 1e-6);
+        assert_vec_close(&actual.to_vec(), expected, 1e-6);
     }
 }
 
@@ -415,17 +636,19 @@ fn randomized_autodiff_matches_tape_engine_on_overlapping_scalar_suite() {
             let x = random_tensor(&mut rng, &shape, 0.5, 2.0);
             let y = random_tensor(&mut rng, &shape, 0.5, 2.0);
             let public_inputs = vec![x.clone(), y.clone()];
-            let input_specs = [(&x.data()[..], &shape[..]), (&y.data()[..], &shape[..])];
+            let x_data = x.to_vec();
+            let y_data = y.to_vec();
+            let input_specs = [(&x_data[..], &shape[..]), (&y_data[..], &shape[..])];
 
             let (new_value, new_grads) =
                 autodiff::value_and_grad(|xs| eval_public_stress_case(case_id, xs), &public_inputs);
             let (legacy_value, legacy_grads) =
                 legacy_value_and_grad(&input_specs, |xs| eval_legacy_stress_case(case_id, xs));
 
-            assert_vec_close(new_value.data(), &legacy_value, 1e-5);
+            assert_vec_close(&new_value.to_vec(), &legacy_value, 1e-5);
             assert_eq!(new_grads.len(), legacy_grads.len());
             for (actual, expected) in new_grads.iter().zip(legacy_grads.iter()) {
-                assert_vec_close(actual.data(), expected, 1e-5);
+                assert_vec_close(&actual.to_vec(), expected, 1e-5);
             }
         }
     }
@@ -455,8 +678,8 @@ fn randomized_finite_difference_matches_public_autodiff_on_composite_suite() {
             let fd_x = finite_difference(f, &inputs, 0, 1e-3);
             let fd_y = finite_difference(f, &inputs, 1, 1e-3);
 
-            assert_vec_close(grads[0].data(), &fd_x, 3e-3);
-            assert_vec_close(grads[1].data(), &fd_y, 3e-3);
+            assert_vec_close(&grads[0].to_vec(), &fd_x, 3e-3);
+            assert_vec_close(&grads[1].to_vec(), &fd_y, 3e-3);
         }
     }
 }

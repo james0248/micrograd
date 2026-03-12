@@ -26,14 +26,16 @@ fn assert_vec_close(actual: &[f32], expected: &[f32], eps: f32) {
 
 fn assert_dense_close(actual: &DenseTensor, expected: &[f32], shape: &[usize], eps: f32) {
     assert_eq!(actual.shape, shape);
-    assert_vec_close(&actual.data, expected, eps);
+    assert_vec_close(&actual.to_vec(), expected, eps);
 }
 
 fn add_dense(lhs: &DenseTensor, rhs: &DenseTensor) -> DenseTensor {
+    let lhs_data = lhs.to_vec();
+    let rhs_data = rhs.to_vec();
     DenseTensor::from_vec(
-        lhs.data
+        lhs_data
             .iter()
-            .zip(rhs.data.iter())
+            .zip(rhs_data.iter())
             .map(|(&x, &y)| x + y)
             .collect(),
         lhs.shape.clone(),
@@ -41,8 +43,9 @@ fn add_dense(lhs: &DenseTensor, rhs: &DenseTensor) -> DenseTensor {
 }
 
 fn scale_dense(input: &DenseTensor, scale: f32) -> DenseTensor {
+    let data = input.to_vec();
     DenseTensor::from_vec(
-        input.data.iter().map(|&x| x * scale).collect(),
+        data.iter().map(|&x| x * scale).collect(),
         input.shape.clone(),
     )
 }
@@ -60,10 +63,11 @@ where
         .iter()
         .zip(tangents.iter())
         .map(|(primal, tangent)| {
-            let data = primal
-                .data
+            let primal_data = primal.to_vec();
+            let tangent_data = tangent.to_vec();
+            let data = primal_data
                 .iter()
-                .zip(tangent.data.iter())
+                .zip(tangent_data.iter())
                 .map(|(&x, &dx)| x + eps * dx)
                 .collect();
             Tensor::from_vec(data, primal.shape.clone())
@@ -73,10 +77,11 @@ where
         .iter()
         .zip(tangents.iter())
         .map(|(primal, tangent)| {
-            let data = primal
-                .data
+            let primal_data = primal.to_vec();
+            let tangent_data = tangent.to_vec();
+            let data = primal_data
                 .iter()
-                .zip(tangent.data.iter())
+                .zip(tangent_data.iter())
                 .map(|(&x, &dx)| x - eps * dx)
                 .collect();
             Tensor::from_vec(data, primal.shape.clone())
@@ -85,10 +90,11 @@ where
 
     let plus = f(&plus_inputs);
     let minus = f(&minus_inputs);
-    let data = plus
-        .data()
+    let plus_data = plus.to_vec();
+    let minus_data = minus.to_vec();
+    let data = plus_data
         .iter()
-        .zip(minus.data().iter())
+        .zip(minus_data.iter())
         .map(|(&p, &m)| (p - m) / (2.0 * eps))
         .collect();
     DenseTensor::from_vec(data, plus.shape().to_vec())
@@ -96,7 +102,7 @@ where
 
 fn assert_tensor_close(actual: &Tensor, expected: &Tensor, eps: f32) {
     assert_eq!(actual.shape(), expected.shape());
-    assert_vec_close(actual.data(), expected.data(), eps);
+    assert_vec_close(&actual.to_vec(), &expected.to_vec(), eps);
 }
 
 #[test]
@@ -231,6 +237,18 @@ fn linearize_supports_nonscalar_outputs() {
 }
 
 #[test]
+fn linearize_transpose_matches_analytic_jvp() {
+    let inputs = vec![DenseTensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2])];
+    let tangents = vec![DenseTensor::from_vec(vec![0.5, -1.0, 2.0, 1.5], vec![2, 2])];
+
+    let (output, linearized) = linearize(|xs| xs[0].transpose(0, 1), &inputs);
+    let tangent = linearized.apply_dense(&tangents);
+
+    assert_dense_close(&output, &[1.0, 3.0, 2.0, 4.0], &[2, 2], 1e-6);
+    assert_dense_close(&tangent, &[0.5, 2.0, -1.0, 1.5], &[2, 2], 1e-6);
+}
+
+#[test]
 fn linearize_captures_forward_coefficients_as_residual_inputs() {
     let inputs = vec![
         DenseTensor::from_vec(vec![2.0, 3.0], vec![2]),
@@ -265,7 +283,7 @@ fn linearize_matches_directional_finite_difference_on_composite_function() {
     let tangent = linearized.apply_dense(&tangents);
     let fd = directional_finite_difference(f, &inputs, &tangents, 1e-3);
 
-    assert_vec_close(&tangent.data, &fd.data, 2e-3);
+    assert_vec_close(&tangent.to_vec(), &fd.to_vec(), 2e-3);
 }
 
 #[test]
@@ -282,11 +300,11 @@ fn linearize_tangent_map_is_linear() {
         &linearized.apply_dense(std::slice::from_ref(&v1)),
         &linearized.apply_dense(std::slice::from_ref(&v2)),
     );
-    assert_vec_close(&lhs_add.data, &rhs_add.data, 1e-6);
+    assert_vec_close(&lhs_add.to_vec(), &rhs_add.to_vec(), 1e-6);
 
     let lhs_scale = linearized.apply_dense(&[scale_dense(&v1, scalar)]);
     let rhs_scale = scale_dense(&linearized.apply_dense(std::slice::from_ref(&v1)), scalar);
-    assert_vec_close(&lhs_scale.data, &rhs_scale.data, 1e-6);
+    assert_vec_close(&lhs_scale.to_vec(), &rhs_scale.to_vec(), 1e-6);
 }
 
 #[test]
@@ -426,6 +444,19 @@ fn transpose_pullback_mean_all_matches_analytic_vjp() {
     let grads = pullback.apply_dense(&output_cotangent);
 
     assert_dense_close(&grads[0], &[1.0, 1.0, 1.0, 1.0], &[2, 2], 1e-6);
+}
+
+#[test]
+fn transpose_pullback_transpose_matches_analytic_vjp() {
+    let inputs = vec![DenseTensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2])];
+    let output_cotangent = DenseTensor::from_vec(vec![2.0, -1.0, 0.5, 3.0], vec![2, 2]);
+
+    let (_output, linearized) = linearize(|xs| xs[0].transpose(0, 1), &inputs);
+    let pullback = transpose_linearized(&linearized);
+    let grads = pullback.apply_dense(&output_cotangent);
+
+    assert_eq!(grads.len(), 1);
+    assert_dense_close(&grads[0], &[2.0, 0.5, -1.0, 3.0], &[2, 2], 1e-6);
 }
 
 #[test]

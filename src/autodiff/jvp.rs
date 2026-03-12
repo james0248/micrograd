@@ -2,7 +2,7 @@ use std::cell::RefCell;
 
 use crate::tensor::{
     DenseTensor, Tensor, TensorInner, TensorSpec, TracedTensor, ValueId, elementwise_binary,
-    unary_map,
+    mean_all, sum_all, unary_map,
 };
 
 use super::Operation;
@@ -75,6 +75,11 @@ pub(crate) fn jvp_binary(lhs: &Tensor, rhs: &Tensor, op: Operation) -> Option<Te
     let output = with_jvp_recorder(|recorder| {
         let lhs = jvp_operand(recorder, lhs);
         let rhs = jvp_operand(recorder, rhs);
+        assert_eq!(
+            lhs.primal.shape, rhs.primal.shape,
+            "autodiff does not support broadcasted {:?} yet",
+            op
+        );
         let primal = eager_binary(&op, &lhs.primal, &rhs.primal);
         let spec = primal.spec();
         let tangent = match op {
@@ -120,9 +125,7 @@ pub(crate) fn jvp_binary(lhs: &Tensor, rhs: &Tensor, op: Operation) -> Option<Te
             Operation::Div => {
                 let lhs_coeff = unary_map(&rhs.primal, |x| 1.0 / x);
                 let rhs_coeff =
-                    elementwise_binary(&lhs.primal, &rhs.primal, "div_rhs_coeff", |x, y| {
-                        -x / (y * y)
-                    });
+                    elementwise_binary(&lhs.primal, &rhs.primal, |x, y| -x / (y * y));
                 let lhs_residual = recorder.add_residual(lhs_coeff).var;
                 let rhs_residual = recorder.add_residual(rhs_coeff).var;
                 let lhs_term = recorder
@@ -191,6 +194,15 @@ pub(crate) fn jvp_unary(input: &Tensor, op: Operation) -> Option<Tensor> {
             Operation::MeanAll => {
                 recorder
                     .add_instruction(Operation::MeanAll, vec![jvp.tangent.var], spec.clone())
+                    .var
+            }
+            Operation::Transpose { dim0, dim1 } => {
+                recorder
+                    .add_instruction(
+                        Operation::Transpose { dim0, dim1 },
+                        vec![jvp.tangent.var],
+                        spec.clone(),
+                    )
                     .var
             }
             _ => panic!("jvp_unary does not support operation {:?}", op),
@@ -302,10 +314,10 @@ fn jvp_operand(recorder: &mut JvpRecorder, tensor: &Tensor) -> JvpOperand {
 
 fn eager_binary(op: &Operation, lhs: &DenseTensor, rhs: &DenseTensor) -> DenseTensor {
     match op {
-        Operation::Add => elementwise_binary(lhs, rhs, "add", |x, y| x + y),
-        Operation::Sub => elementwise_binary(lhs, rhs, "sub", |x, y| x - y),
-        Operation::Mul => elementwise_binary(lhs, rhs, "mul", |x, y| x * y),
-        Operation::Div => elementwise_binary(lhs, rhs, "div", |x, y| x / y),
+        Operation::Add => elementwise_binary(lhs, rhs, |x, y| x + y),
+        Operation::Sub => elementwise_binary(lhs, rhs, |x, y| x - y),
+        Operation::Mul => elementwise_binary(lhs, rhs, |x, y| x * y),
+        Operation::Div => elementwise_binary(lhs, rhs, |x, y| x / y),
         _ => panic!("eager_binary does not support operation {:?}", op),
     }
 }
@@ -314,11 +326,9 @@ fn eager_unary(op: &Operation, input: &DenseTensor) -> DenseTensor {
     match op {
         Operation::Exp => unary_map(input, |x| x.exp()),
         Operation::Log => unary_map(input, |x| x.ln()),
-        Operation::SumAll => DenseTensor::from_vec(vec![input.data.iter().copied().sum()], vec![1]),
-        Operation::MeanAll => {
-            let sum: f32 = input.data.iter().copied().sum();
-            DenseTensor::from_vec(vec![sum / input.data.len() as f32], vec![1])
-        }
+        Operation::SumAll => sum_all(input),
+        Operation::MeanAll => mean_all(input),
+        Operation::Transpose { dim0, dim1 } => input.transpose(*dim0, *dim1),
         _ => panic!("eager_unary does not support operation {:?}", op),
     }
 }

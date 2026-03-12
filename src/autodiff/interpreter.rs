@@ -1,4 +1,6 @@
-use crate::tensor::{DenseTensor, Tensor, TensorInner, elementwise_binary, unary_map};
+use crate::tensor::{
+    DenseTensor, Tensor, TensorInner, elementwise_binary, mean_all, sum_all, unary_map,
+};
 
 use super::ir::{Operation, Trace};
 
@@ -35,7 +37,7 @@ pub(crate) fn execute_trace(trace: &Trace, inputs: &[DenseTensor]) -> Vec<DenseT
                 let rhs = values[instruction.inputs[1]]
                     .as_ref()
                     .expect("add rhs value must exist");
-                elementwise_binary(lhs, rhs, "add", |x, y| x + y)
+                elementwise_binary(lhs, rhs, |x, y| x + y)
             }
             Operation::Sub => {
                 let lhs = values[instruction.inputs[0]]
@@ -44,7 +46,7 @@ pub(crate) fn execute_trace(trace: &Trace, inputs: &[DenseTensor]) -> Vec<DenseT
                 let rhs = values[instruction.inputs[1]]
                     .as_ref()
                     .expect("sub rhs value must exist");
-                elementwise_binary(lhs, rhs, "sub", |x, y| x - y)
+                elementwise_binary(lhs, rhs, |x, y| x - y)
             }
             Operation::Mul => {
                 let lhs = values[instruction.inputs[0]]
@@ -53,7 +55,7 @@ pub(crate) fn execute_trace(trace: &Trace, inputs: &[DenseTensor]) -> Vec<DenseT
                 let rhs = values[instruction.inputs[1]]
                     .as_ref()
                     .expect("mul rhs value must exist");
-                elementwise_binary(lhs, rhs, "mul", |x, y| x * y)
+                elementwise_binary(lhs, rhs, |x, y| x * y)
             }
             Operation::Div => {
                 let lhs = values[instruction.inputs[0]]
@@ -62,7 +64,7 @@ pub(crate) fn execute_trace(trace: &Trace, inputs: &[DenseTensor]) -> Vec<DenseT
                 let rhs = values[instruction.inputs[1]]
                     .as_ref()
                     .expect("div rhs value must exist");
-                elementwise_binary(lhs, rhs, "div", |x, y| x / y)
+                elementwise_binary(lhs, rhs, |x, y| x / y)
             }
             Operation::Exp => {
                 let input = values[instruction.inputs[0]]
@@ -80,29 +82,31 @@ pub(crate) fn execute_trace(trace: &Trace, inputs: &[DenseTensor]) -> Vec<DenseT
                 let input = values[instruction.inputs[0]]
                     .as_ref()
                     .expect("sum_all input value must exist");
-                DenseTensor::from_vec(vec![input.data.iter().copied().sum()], vec![1])
+                sum_all(input)
             }
             Operation::MeanAll => {
                 let input = values[instruction.inputs[0]]
                     .as_ref()
                     .expect("mean_all input value must exist");
-                assert!(
-                    !input.data.is_empty(),
-                    "mean_all requires a tensor with at least one element"
-                );
-                let sum: f32 = input.data.iter().copied().sum();
-                DenseTensor::from_vec(vec![sum / input.data.len() as f32], vec![1])
+                mean_all(input)
+            }
+            Operation::Transpose { dim0, dim1 } => {
+                let input = values[instruction.inputs[0]]
+                    .as_ref()
+                    .expect("transpose input value must exist");
+                input.transpose(*dim0, *dim1)
             }
             Operation::ExpandScalar { shape } => {
                 let input = values[instruction.inputs[0]]
                     .as_ref()
                     .expect("expand_scalar input value must exist");
-                assert!(
-                    input.data.len() == 1,
+                assert_eq!(
+                    input.shape,
+                    [1],
                     "ExpandScalar requires a scalar input, got shape {:?}",
                     input.shape
                 );
-                DenseTensor::filled(shape.clone(), input.data[0])
+                DenseTensor::filled(shape.clone(), input.value_at(&[0]))
             }
         };
 
