@@ -61,45 +61,17 @@ impl Mlp {
     }
 
     pub fn forward(&self, x: &Tensor) -> Tensor {
-        let mut out = x.clone();
-        let last_idx = self.layers.len().saturating_sub(1);
-        for (idx, layer) in self.layers.iter().enumerate() {
-            out = layer.forward(&out);
-            if idx < last_idx {
-                out = out.relu();
-            }
-        }
-        out
+        self.forward_with_params(&self.parameters(), x)
     }
 
     pub fn forward_with_params(&self, params: &[Tensor], x: &Tensor) -> Tensor {
-        let expected = self.layers.len() * 2;
-        assert_eq!(
-            params.len(),
-            expected,
-            "parameter count mismatch: expected {expected}, got {}",
-            params.len()
-        );
+        self.validate_param_shapes(params, "parameter");
 
         let mut out = x.clone();
         let last_idx = self.layers.len().saturating_sub(1);
-        for (idx, layer) in self.layers.iter().enumerate() {
+        for (idx, _layer) in self.layers.iter().enumerate() {
             let weight = &params[idx * 2];
             let bias = &params[idx * 2 + 1];
-            assert_eq!(
-                weight.shape(),
-                layer.weight.shape(),
-                "weight shape mismatch at layer {idx}: expected {:?}, got {:?}",
-                layer.weight.shape(),
-                weight.shape()
-            );
-            assert_eq!(
-                bias.shape(),
-                layer.bias.shape(),
-                "bias shape mismatch at layer {idx}: expected {:?}, got {:?}",
-                layer.bias.shape(),
-                bias.shape()
-            );
 
             out = out.matmul(weight).add(bias);
             if idx < last_idx {
@@ -108,6 +80,32 @@ impl Mlp {
         }
 
         out
+    }
+
+    fn validate_param_shapes(&self, tensors: &[Tensor], label: &str) {
+        let expected = self.layers.len() * 2;
+        assert_eq!(
+            tensors.len(),
+            expected,
+            "{label} count mismatch: expected {expected}, got {}",
+            tensors.len()
+        );
+        for (idx, layer) in self.layers.iter().enumerate() {
+            assert_eq!(
+                tensors[idx * 2].shape(),
+                layer.weight.shape(),
+                "{label} shape mismatch for weight at layer {idx}: expected {:?}, got {:?}",
+                layer.weight.shape(),
+                tensors[idx * 2].shape()
+            );
+            assert_eq!(
+                tensors[idx * 2 + 1].shape(),
+                layer.bias.shape(),
+                "{label} shape mismatch for bias at layer {idx}: expected {:?}, got {:?}",
+                layer.bias.shape(),
+                tensors[idx * 2 + 1].shape()
+            );
+        }
     }
 
     pub fn parameters(&self) -> Vec<Tensor> {
@@ -213,32 +211,12 @@ impl Parameterized for Mlp {
     }
 
     fn apply_gradients(&mut self, grads: &[Tensor], scale: f32) {
-        let expected = self.layers.len() * 2;
-        assert_eq!(
-            grads.len(),
-            expected,
-            "gradient count mismatch: expected {expected}, got {}",
-            grads.len()
-        );
+        self.validate_param_shapes(grads, "gradient");
 
         let scale_tensor = Tensor::from_vec(vec![scale], vec![1]);
         for (idx, layer) in self.layers.iter_mut().enumerate() {
             let weight_grad = &grads[idx * 2];
             let bias_grad = &grads[idx * 2 + 1];
-            assert_eq!(
-                weight_grad.shape(),
-                layer.weight.shape(),
-                "gradient shape mismatch for weight at layer {idx}: expected {:?}, got {:?}",
-                layer.weight.shape(),
-                weight_grad.shape()
-            );
-            assert_eq!(
-                bias_grad.shape(),
-                layer.bias.shape(),
-                "gradient shape mismatch for bias at layer {idx}: expected {:?}, got {:?}",
-                layer.bias.shape(),
-                bias_grad.shape()
-            );
 
             layer.weight = layer.weight.sub(&weight_grad.mul(&scale_tensor));
             layer.bias = layer.bias.sub(&bias_grad.mul(&scale_tensor));

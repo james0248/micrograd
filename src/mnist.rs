@@ -1,6 +1,7 @@
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
+use std::cell::RefCell;
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
@@ -163,20 +164,20 @@ pub fn run() -> Result<(), String> {
             let batch = yb.len();
             let x = Tensor::from_vec(xb, vec![batch, train.cols]);
 
-            let logits = model.forward(&x);
-            let classes = logits.shape()[1];
-            let logits_data = logits.to_vec();
-            let correct = count_correct(&logits_data, classes, &yb);
+            let logits_cell: RefCell<Option<(Vec<f32>, usize)>> = RefCell::new(None);
 
             let params = model.parameters();
             let (loss, grads) = autodiff::value_and_grad(
                 |ps| {
                     let logits = model.forward_with_params(ps, &x);
+                    logits_cell.borrow_mut().replace((logits.to_vec(), logits.shape()[1]));
                     cross_entropy_with_logits(&logits, &yb)
                 },
                 &params,
             );
             let loss_value = loss.to_vec()[0];
+            let (logits_data, classes) = logits_cell.into_inner().expect("closure must run");
+            let correct = count_correct(&logits_data, classes, &yb);
 
             optimizer.step(&mut model, &grads);
 

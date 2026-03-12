@@ -4,14 +4,10 @@
 
 This document tracks the migration from the legacy dynamic, tape-style autograd engine toward a more JAX-like functional tracing and transformation system.
 
-The legacy engine remains in the repository until the new autodiff path is validated and trusted.
-
 ## Current State
 
 - The package and crate name is currently `tangent`.
-- The legacy engine still exists and remains the correctness baseline.
-- The legacy tape-based engine is also used as an external parity reference for overlapping public operations.
-- A new autodiff path already exists beside the legacy engine.
+- The new autodiff path is now the only engine/runtime path in the crate.
 - The new autodiff path currently uses:
   - a flat SSA-like `Trace`
   - internal tracing via thread-local recorder state
@@ -55,9 +51,9 @@ The legacy engine remains in the repository until the new autodiff path is valid
   - `max(axis, keepdim)`
   - `relu`
   - `matmul`
-- `max(axis, keepdim)` now uses evenly split tie gradients, matching the legacy engine.
+- `max(axis, keepdim)` now uses evenly split tie gradients.
 - The current training stack (`nn`, `losses`, `optim`, `mnist`) now runs on the new `tensor` + `autodiff` path.
-- The legacy engine remains in the repository only as a compatibility baseline and external parity reference.
+- The legacy engine has been removed from the crate and repository.
 - General `sum(axes, keepdim)` and `mean(axes, keepdim)` are part of the long-term direction; the current `sum_all` / `mean_all` API is still transitional.
 
 ## Desired State
@@ -79,8 +75,7 @@ The legacy engine remains in the repository until the new autodiff path is valid
   - generic strided layout/view semantics for broadcasted and transposed tensors
   - no hidden materialization in public tensor transforms
 - Defer `reshape` until there is a clear policy for when a non-copy reshape is layout-compatible and when a copy would otherwise be required.
-- Remove the legacy tape-based engine only after the new engine can run the training code and scripts directly.
-- Keep the migration validation-first: the old engine stays in place until the new path is reliable.
+- Keep the migration validation-first while strengthening the new-engine-only test surface.
 
 ## Key Decisions
 
@@ -102,12 +97,12 @@ The legacy engine remains in the repository until the new autodiff path is valid
   - `Add` / `Sub` / `Mul` / `Div` remain the operations
   - shape inference and the interpreter handle broadcast semantics from operand shapes
   - explicit helper ops such as `BroadcastTo` can be added later only if backward needs them
-- Stage 3 reductions should use single-axis operations with `axis: usize` and `keepdim: bool`, matching the legacy engine.
+- Stage 3 reductions should use single-axis operations with `axis: usize` and `keepdim: bool`.
 - Stage 3 should trace and interpret the expanded batched op set through `linearize` where the local linearization rule is already settled, but public autodiff should still fail fast on those ops until Stage 4 transpose rules exist.
 - Stage 3 `max` work is forward-only and stays out of `linearize`; tie-gradient policy remains a Stage 4 concern.
 - Stage 3 `matmul` should use full legacy semantics immediately: rank `>= 2`, inner-dimension match, and batch-dimension broadcasting.
 - General `sum(axes, keepdim)` and `mean(axes, keepdim)` should replace `sum_all` / `mean_all` later; Stage 3 does not add them yet.
-- Stage 4 `max(axis, keepdim)` should split tie gradients evenly, matching the legacy engine and value-only `amax`-style semantics.
+- Stage 4 `max(axis, keepdim)` should split tie gradients evenly, matching value-only `amax`-style semantics.
 - Batched training support should be implemented in stages:
   - layout and view foundation
   - eager batched ops
@@ -121,7 +116,6 @@ The legacy engine remains in the repository until the new autodiff path is valid
   - `relu`
   - `matmul`
   - `max(axis, keepdim)`
-- During validation, the new autodiff path should also be compared against the older tape-based engine on overlapping forward and gradient behavior.
 - Regular trace mode is not part of the target architecture and has been removed.
 - `Recorder` should remain as the generic low-level IR/trace builder. `JvpRecorder` should not replace it one-for-one; after migration it can stay as a linearization-specific wrapper or be renamed if a better name emerges.
 
@@ -129,7 +123,7 @@ The legacy engine remains in the repository until the new autodiff path is valid
 
 ### Done
 
-- A side-by-side new autodiff path exists beside the legacy engine.
+- The new autodiff path is fully in place and owns the runtime/training path.
 - The new code is split into `tensor` and `autodiff` modules.
 - The test-only debug API has been removed.
 - Scalar-output validation has moved from tracing to the public autodiff entrypoints.
@@ -139,8 +133,7 @@ The legacy engine remains in the repository until the new autodiff path is valid
 - Internal transpose-based pullback exists.
 - Public `value_and_grad` is routed through the transpose-based path.
 - Direct VJP and regular primal tracing have been removed.
-- Integration tests compare the new autodiff API against the legacy tape-based engine on overlapping operations.
-- Integration tests include randomized stress coverage against finite differences and the legacy tape-based engine.
+- Integration tests include deterministic and randomized finite-difference stress coverage.
 - Stage 1 layout work is complete:
   - dense backing storage plus generic strided layouts
   - explicit `to_vec()` materialization on the new tensor type
@@ -173,24 +166,26 @@ The legacy engine remains in the repository until the new autodiff path is valid
   - SGD now consumes explicit grads and mutates model state through `Parameterized`
   - checkpoint save/load remains compatible while using `to_vec()` and mutable weight loading
   - the training loop preserves the current batched style on the new engine
+- Stage 6 legacy-engine removal is complete:
+  - the `engine` module and engine-specific tests have been deleted
+  - public tests now rely on finite differences, white-box autodiff coverage, training smoke tests, and checkpoint/MNIST integration
 
 ### Current
 
-- Stage 6: remove the legacy engine and its engine-specific tests.
-- Keep validation strength high while trimming the old path:
+- Strengthen the post-migration new-engine baseline:
   - finite-difference coverage
   - new-engine white-box tests
   - training smoke tests
   - checkpoint and MNIST integration tests
+- Residual deduplication is the next engine-improvement phase.
 
 ### Next
 
-- Remove the legacy engine from the public training path and delete engine-specific compatibility tests and helpers.
+- Add residual deduplication once the batched new-engine path is considered stable.
+- Add general `sum(axes, keepdim)` and `mean(axes, keepdim)`, then retire `sum_all` / `mean_all`.
 
 ### Later
 
-- Add residual deduplication once the batched new-engine path is considered correct.
-- Add general `sum(axes, keepdim)` and `mean(axes, keepdim)`, then retire `sum_all` / `mean_all`.
 - Revisit `reshape` support once the layout model is stable and there is a clear explicit policy for copy vs non-copy behavior.
 - Revisit naming cleanup around `JvpRecorder` and other migration-era terms if they still feel temporary.
 - Only after that, consider internal or public `vjp` and possible `grad(f)(inputs)`-style APIs.
@@ -210,9 +205,9 @@ The legacy engine remains in the repository until the new autodiff path is valid
     - Stage 4.4: `matmul`
     - Stage 4.5: `max(axis, keepdim)`
   - Stage 5: training stack migration onto the new engine (done)
-  - Stage 6: legacy engine removal and validation cleanup (current)
+  - Stage 6: legacy engine removal and validation cleanup (done)
 - Keep `Recorder` as the shared low-level builder while the migration converges. Treat `JvpRecorder` as a higher-level linearization helper rather than the permanent replacement for `Recorder`.
-- Validate each stage with new-engine white-box tests, finite differences, and legacy-engine parity where overlap exists.
+- Validate each stage with new-engine white-box tests, finite differences, training smoke tests, and checkpoint/MNIST integration.
 
 ## Open Questions
 

@@ -47,9 +47,7 @@ impl Tensor {
     pub fn to_vec(&self) -> Vec<f32> {
         match &self.inner {
             TensorInner::Concrete(tensor) => tensor.to_vec(),
-            TensorInner::Jvp(_) => {
-                panic!("tangent::tensor::Tensor::to_vec() is unavailable while tracing")
-            }
+            TensorInner::Jvp(jvp) => jvp.primal.to_vec(),
         }
     }
 

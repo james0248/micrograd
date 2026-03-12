@@ -1,7 +1,6 @@
 pub mod autodiff;
 mod checkpoint;
 pub mod data;
-pub mod engine;
 pub mod losses;
 pub mod mnist;
 pub mod nn;
