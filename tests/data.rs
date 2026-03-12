@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use micrograd::data::{load_and_split_mnist, load_mnist_csv};
+use tangent::data::{load_and_split_mnist, load_mnist_csv};
 
 fn header_line() -> String {
     let mut header = String::from("label");
@@ -29,7 +29,7 @@ fn write_temp_csv(body: &str) -> PathBuf {
         .expect("time should be monotonic here")
         .as_nanos();
     let path = std::env::temp_dir().join(format!(
-        "micrograd_mnist_test_{}_{}.csv",
+        "tangent_mnist_test_{}_{}.csv",
         std::process::id(),
         nanos
     ));

@@ -1,45 +1,73 @@
-use micrograd::engine::{Tensor, reset_state};
-use micrograd::optim::{Optimizer, Sgd};
+use tangent::nn::Mlp;
+use tangent::optim::{Optimizer, Sgd};
+use tangent::tensor::Tensor;
 
-#[test]
-fn sgd_step_updates_parameter_data() {
-    reset_state();
-    let p = Tensor::parameter(vec![1.0, -2.0, 3.0], vec![3]);
-    p.set_grad(&[0.5, -1.0, 2.0]);
-
-    let mut opt = Sgd::new(vec![p], 0.1);
-    opt.step();
-
-    let updated = p.data();
-    assert_eq!(updated.len(), 3);
-    assert!((updated[0] - 0.95).abs() < 1e-6);
-    assert!((updated[1] - -1.9).abs() < 1e-6);
-    assert!((updated[2] - 2.8).abs() < 1e-6);
+fn snapshot_params(model: &Mlp) -> Vec<Vec<f32>> {
+    model.parameters().iter().map(Tensor::to_vec).collect()
 }
 
 #[test]
-fn sgd_zero_grad_clears_all_parameter_grads() {
-    reset_state();
-    let a = Tensor::parameter(vec![1.0, 2.0], vec![2]);
-    let b = Tensor::parameter(vec![3.0], vec![1]);
-    a.set_grad(&[1.0, -2.0]);
-    b.set_grad(&[5.0]);
+fn sgd_step_updates_model_parameter_data() {
+    let mut model = Mlp::new(&[2, 3], 7);
+    let before = snapshot_params(&model);
+    let grads = vec![
+        Tensor::from_vec(vec![0.5, -1.0, 2.0, 0.25, 1.5, -0.75], vec![2, 3]),
+        Tensor::from_vec(vec![1.0, -0.5, 0.25], vec![3]),
+    ];
 
-    let mut opt = Sgd::new(vec![a, b], 0.01);
-    opt.zero_grad();
+    let mut opt = Sgd::new(0.1);
+    opt.step(&mut model, &grads);
 
-    assert_eq!(a.grad(), vec![0.0, 0.0]);
-    assert_eq!(b.grad(), vec![0.0]);
+    let after = snapshot_params(&model);
+    for ((before_param, after_param), grad) in before.iter().zip(after.iter()).zip(grads.iter()) {
+        for ((before_value, after_value), grad_value) in before_param
+            .iter()
+            .zip(after_param.iter())
+            .zip(grad.to_vec().iter())
+        {
+            let expected = before_value - 0.1 * grad_value;
+            assert!((after_value - expected).abs() < 1e-6);
+        }
+    }
 }
 
 #[test]
 fn sgd_set_lr_is_applied_on_next_step() {
-    reset_state();
-    let p = Tensor::parameter(vec![1.0], vec![1]);
-    p.set_grad(&[1.0]);
+    let mut model = Mlp::new(&[1, 1], 11);
+    let before = snapshot_params(&model);
+    let grads = vec![
+        Tensor::from_vec(vec![1.0], vec![1, 1]),
+        Tensor::from_vec(vec![1.0], vec![1]),
+    ];
 
-    let mut opt = Sgd::new(vec![p], 0.1);
+    let mut opt = Sgd::new(0.1);
     opt.set_lr(0.5);
-    opt.step();
-    assert!((p.data()[0] - 0.5).abs() < 1e-6);
+    opt.step(&mut model, &grads);
+
+    let after = snapshot_params(&model);
+    assert!((after[0][0] - (before[0][0] - 0.5)).abs() < 1e-6);
+    assert!((after[1][0] - (before[1][0] - 0.5)).abs() < 1e-6);
+}
+
+#[test]
+#[should_panic(expected = "gradient count mismatch")]
+fn sgd_step_rejects_gradient_count_mismatch() {
+    let mut model = Mlp::new(&[2, 3], 5);
+    let grads = vec![Tensor::from_vec(vec![1.0; 6], vec![2, 3])];
+
+    let mut opt = Sgd::new(0.1);
+    opt.step(&mut model, &grads);
+}
+
+#[test]
+#[should_panic(expected = "gradient shape mismatch")]
+fn sgd_step_rejects_gradient_shape_mismatch() {
+    let mut model = Mlp::new(&[2, 3], 5);
+    let grads = vec![
+        Tensor::from_vec(vec![1.0; 3], vec![3, 1]),
+        Tensor::from_vec(vec![1.0; 3], vec![3]),
+    ];
+
+    let mut opt = Sgd::new(0.1);
+    opt.step(&mut model, &grads);
 }

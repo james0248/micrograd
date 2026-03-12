@@ -1,15 +1,17 @@
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
+use std::cell::RefCell;
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
+use crate::autodiff;
 use crate::data::{MnistSample, load_and_split_mnist};
-use crate::engine::{Tensor, no_grad, with_grad};
 use crate::losses::cross_entropy_with_logits;
 use crate::nn::Mlp;
 use crate::optim::{Optimizer, Sgd};
+use crate::tensor::Tensor;
 
 const DATA_PATH: &str = "data/train.csv";
 const EVAL_RATIO: f64 = 0.10;
@@ -85,29 +87,27 @@ fn evaluate(model: &Mlp, dataset: &FlatMnist) -> (f32, f32) {
         return (0.0, 0.0);
     }
 
-    no_grad(|| {
-        let mut total_loss = 0.0f32;
-        let mut total_correct = 0usize;
-        let mut seen = 0usize;
+    let mut total_loss = 0.0f32;
+    let mut total_correct = 0usize;
+    let mut seen = 0usize;
 
-        let indices: Vec<usize> = (0..dataset.rows).collect();
-        for chunk in indices.chunks(BATCH_SIZE) {
-            let (xb, yb) = build_batch(dataset, chunk);
-            let batch = yb.len();
-            let x = Tensor::from_vec(xb, vec![batch, dataset.cols]);
-            let logits = model.forward(&x);
-            let loss = cross_entropy_with_logits(&logits, &yb);
-            let loss_value = loss.data()[0];
-            total_loss += loss_value * batch as f32;
+    let indices: Vec<usize> = (0..dataset.rows).collect();
+    for chunk in indices.chunks(BATCH_SIZE) {
+        let (xb, yb) = build_batch(dataset, chunk);
+        let batch = yb.len();
+        let x = Tensor::from_vec(xb, vec![batch, dataset.cols]);
+        let logits = model.forward(&x);
+        let loss = cross_entropy_with_logits(&logits, &yb);
+        let loss_value = loss.to_vec()[0];
+        total_loss += loss_value * batch as f32;
 
-            let logits_data = logits.data();
-            let classes = logits.shape()[1];
-            total_correct += count_correct(&logits_data, classes, &yb);
-            seen += batch;
-        }
+        let logits_data = logits.to_vec();
+        let classes = logits.shape()[1];
+        total_correct += count_correct(&logits_data, classes, &yb);
+        seen += batch;
+    }
 
-        (total_loss / seen as f32, total_correct as f32 / seen as f32)
-    })
+    (total_loss / seen as f32, total_correct as f32 / seen as f32)
 }
 
 fn learning_rate_for_epoch(epoch: usize) -> f32 {
@@ -144,8 +144,8 @@ pub fn run() -> Result<(), String> {
         train.rows, eval.rows, BATCH_SIZE
     );
 
-    let model = Mlp::new(&[train.cols, 32, 10], MODEL_SEED);
-    let mut optimizer = Sgd::new(model.parameters(), learning_rate_for_epoch(0));
+    let mut model = Mlp::new(&[train.cols, 32, 10], MODEL_SEED);
+    let mut optimizer = Sgd::new(learning_rate_for_epoch(0));
 
     let mut rng = StdRng::seed_from_u64(SHUFFLE_SEED);
     let mut train_indices: Vec<usize> = (0..train.rows).collect();
@@ -160,25 +160,28 @@ pub fn run() -> Result<(), String> {
         let mut seen = 0usize;
 
         for chunk in train_indices.chunks(BATCH_SIZE) {
-            optimizer.zero_grad();
-
             let (xb, yb) = build_batch(&train, chunk);
             let batch = yb.len();
+            let x = Tensor::from_vec(xb, vec![batch, train.cols]);
 
-            let (loss_value, correct) = with_grad(|| {
-                let x = Tensor::from_vec(xb, vec![batch, train.cols]);
-                let logits = model.forward(&x);
-                let classes = logits.shape()[1];
-                let logits_data = logits.data();
-                let batch_correct = count_correct(&logits_data, classes, &yb);
+            let logits_cell: RefCell<Option<(Vec<f32>, usize)>> = RefCell::new(None);
 
-                let loss = cross_entropy_with_logits(&logits, &yb);
-                let loss_value = loss.data()[0];
-                loss.backward();
-                (loss_value, batch_correct)
-            });
+            let params = model.parameters();
+            let (loss, grads) = autodiff::value_and_grad(
+                |ps| {
+                    let logits = model.forward_with_params(ps, &x);
+                    logits_cell
+                        .borrow_mut()
+                        .replace((logits.to_vec(), logits.shape()[1]));
+                    cross_entropy_with_logits(&logits, &yb)
+                },
+                &params,
+            );
+            let loss_value = loss.to_vec()[0];
+            let (logits_data, classes) = logits_cell.into_inner().expect("closure must run");
+            let correct = count_correct(&logits_data, classes, &yb);
 
-            optimizer.step();
+            optimizer.step(&mut model, &grads);
 
             total_loss += loss_value * batch as f32;
             total_correct += correct;
@@ -212,7 +215,6 @@ pub fn run() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::reset_state;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -221,7 +223,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("time should be monotonic here");
         std::env::temp_dir().join(format!(
-            "micrograd_mnist_{tag}_{}_{}",
+            "tangent_mnist_{tag}_{}_{}",
             std::process::id(),
             now.as_nanos()
         ))
@@ -229,7 +231,6 @@ mod tests {
 
     #[test]
     fn save_model_checkpoint_creates_file() {
-        reset_state();
         let dir = temp_path("save_ok");
         let model = Mlp::new(&[2, 4, 2], 7);
         let path = dir.join("weights.ckpt");
@@ -245,7 +246,6 @@ mod tests {
 
     #[test]
     fn save_model_checkpoint_returns_err_for_file_as_directory() {
-        reset_state();
         let base = temp_path("save_err");
         let file_path = base.with_extension("tmp");
         std::fs::File::create(&file_path).expect("create file must succeed");

@@ -7,11 +7,12 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use serde::Serialize;
+use tangent::autodiff;
 
-use micrograd::engine::{Tensor, no_grad, reset_state, with_grad};
-use micrograd::losses::cross_entropy_with_logits;
-use micrograd::nn::Mlp;
-use micrograd::optim::{Optimizer, Sgd};
+use tangent::losses::cross_entropy_with_logits;
+use tangent::nn::Mlp;
+use tangent::optim::{Optimizer, Sgd};
+use tangent::tensor::Tensor;
 
 fn tiny_dataset() -> Vec<([f32; 2], u8)> {
     vec![
@@ -34,13 +35,11 @@ fn build_batch(rows: &[([f32; 2], u8)]) -> (Vec<f32>, Vec<u8>) {
 }
 
 fn mean_loss(model: &Mlp, rows: &[([f32; 2], u8)]) -> f32 {
-    no_grad(|| {
-        let (x, y) = build_batch(rows);
-        let xb = Tensor::from_vec(x, vec![rows.len(), 2]);
-        let logits = model.forward(&xb);
-        let loss = cross_entropy_with_logits(&logits, &y);
-        loss.data()[0]
-    })
+    let (x, y) = build_batch(rows);
+    let xb = Tensor::from_vec(x, vec![rows.len(), 2]);
+    let logits = model.forward(&xb);
+    let loss = cross_entropy_with_logits(&logits, &y);
+    loss.to_vec()[0]
 }
 
 fn temp_checkpoint_path(tag: &str) -> PathBuf {
@@ -49,30 +48,26 @@ fn temp_checkpoint_path(tag: &str) -> PathBuf {
         .expect("time should be monotonic here")
         .as_nanos();
     std::env::temp_dir().join(format!(
-        "micrograd_{tag}_{}_{}.ckpt",
+        "tangent_{tag}_{}_{}.ckpt",
         std::process::id(),
         nanos
     ))
 }
 
 fn snapshot_params(model: &Mlp) -> Vec<Vec<f32>> {
-    model.parameters().iter().map(Tensor::data).collect()
+    model.parameters().iter().map(Tensor::to_vec).collect()
 }
 
 #[test]
 fn mlp_tensor_forward_shape_is_batch_by_output() {
-    reset_state();
     let model = Mlp::new(&[784, 128, 10], 7);
-    with_grad(|| {
-        let x = Tensor::from_vec(vec![0.0; 8 * 784], vec![8, 784]);
-        let out = model.forward(&x);
-        assert_eq!(out.shape(), vec![8, 10]);
-    });
+    let x = Tensor::from_vec(vec![0.0; 8 * 784], vec![8, 784]);
+    let out = model.forward(&x);
+    assert_eq!(out.shape(), vec![8, 10]);
 }
 
 #[test]
 fn mlp_tensor_parameter_count_matches_dims() {
-    reset_state();
     let model = Mlp::new(&[784, 128, 10], 7);
     let params = model.parameters();
     assert_eq!(params.len(), 4);
@@ -82,26 +77,26 @@ fn mlp_tensor_parameter_count_matches_dims() {
 
 #[test]
 fn tensor_training_smoke_loss_decreases() {
-    reset_state();
-    let model = Mlp::new(&[2, 8, 2], 42);
-    let mut optimizer = Sgd::new(model.parameters(), 0.1);
+    let mut model = Mlp::new(&[2, 8, 2], 42);
+    let mut optimizer = Sgd::new(0.1);
     let mut rng = StdRng::seed_from_u64(11);
     let mut rows = tiny_dataset();
     let initial = mean_loss(&model, &rows);
 
     for _ in 0..200 {
         rows.shuffle(&mut rng);
-        optimizer.zero_grad();
 
         let (x, y) = build_batch(&rows);
-        with_grad(|| {
-            let xb = Tensor::from_vec(x, vec![rows.len(), 2]);
-            let logits = model.forward(&xb);
-            let loss = cross_entropy_with_logits(&logits, &y);
-            loss.backward();
-        });
-
-        optimizer.step();
+        let xb = Tensor::from_vec(x, vec![rows.len(), 2]);
+        let params = model.parameters();
+        let (_loss, grads) = autodiff::value_and_grad(
+            |ps| {
+                let logits = model.forward_with_params(ps, &xb);
+                cross_entropy_with_logits(&logits, &y)
+            },
+            &params,
+        );
+        optimizer.step(&mut model, &grads);
     }
 
     let final_loss = mean_loss(&model, &rows);
@@ -113,9 +108,8 @@ fn tensor_training_smoke_loss_decreases() {
 
 #[test]
 fn mlp_weights_roundtrip_save_load() {
-    reset_state();
     let src = Mlp::new(&[2, 8, 2], 42);
-    let dst = Mlp::new(&[2, 8, 2], 7);
+    let mut dst = Mlp::new(&[2, 8, 2], 7);
     let path = temp_checkpoint_path("nn_roundtrip");
 
     let src_params = snapshot_params(&src);
@@ -132,9 +126,8 @@ fn mlp_weights_roundtrip_save_load() {
 
 #[test]
 fn mlp_weights_load_rejects_dims_mismatch() {
-    reset_state();
     let src = Mlp::new(&[2, 8, 2], 42);
-    let dst = Mlp::new(&[2, 4, 2], 7);
+    let mut dst = Mlp::new(&[2, 4, 2], 7);
     let path = temp_checkpoint_path("nn_dims_mismatch");
 
     src.save_weights(&path).expect("save must succeed");
@@ -149,8 +142,7 @@ fn mlp_weights_load_rejects_dims_mismatch() {
 
 #[test]
 fn mlp_weights_load_rejects_corrupted_file() {
-    reset_state();
-    let model = Mlp::new(&[2, 8, 2], 7);
+    let mut model = Mlp::new(&[2, 8, 2], 7);
     let path = temp_checkpoint_path("nn_corrupted");
 
     fs::write(&path, b"not a checkpoint").expect("write must succeed");
@@ -169,8 +161,7 @@ struct RawCheckpointV1 {
 
 #[test]
 fn mlp_weights_load_rejects_param_count_mismatch_without_mutation() {
-    reset_state();
-    let model = Mlp::new(&[2, 8, 2], 7);
+    let mut model = Mlp::new(&[2, 8, 2], 7);
     let path = temp_checkpoint_path("nn_param_count");
     let payload = RawCheckpointV1 {
         version: 1,

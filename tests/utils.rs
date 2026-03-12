@@ -1,4 +1,4 @@
-use micrograd::utils::split_train_and_eval;
+use tangent::utils::split_train_and_eval;
 
 #[test]
 fn split_train_and_eval_keeps_prefix_for_train_and_suffix_for_eval() {

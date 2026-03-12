@@ -2,7 +2,8 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
 use crate::checkpoint::{MLP_CHECKPOINT_VERSION, load_mlp_checkpoint, save_mlp_checkpoint};
-use crate::engine::Tensor;
+use crate::optim::Parameterized;
+use crate::tensor::Tensor;
 
 #[derive(Debug, Clone)]
 pub struct Linear {
@@ -29,8 +30,8 @@ impl Linear {
         let b = vec![0.0; nout];
 
         Self {
-            weight: Tensor::parameter(w, vec![nin, nout]),
-            bias: Tensor::parameter(b, vec![nout]),
+            weight: Tensor::from_vec(w, vec![nin, nout]),
+            bias: Tensor::from_vec(b, vec![nout]),
         }
     }
 
@@ -39,7 +40,7 @@ impl Linear {
     }
 
     pub fn parameters(&self) -> Vec<Tensor> {
-        vec![self.weight, self.bias]
+        vec![self.weight.clone(), self.bias.clone()]
     }
 }
 
@@ -60,15 +61,51 @@ impl Mlp {
     }
 
     pub fn forward(&self, x: &Tensor) -> Tensor {
-        let mut out = *x;
+        self.forward_with_params(&self.parameters(), x)
+    }
+
+    pub fn forward_with_params(&self, params: &[Tensor], x: &Tensor) -> Tensor {
+        self.validate_param_shapes(params, "parameter");
+
+        let mut out = x.clone();
         let last_idx = self.layers.len().saturating_sub(1);
-        for (idx, layer) in self.layers.iter().enumerate() {
-            out = layer.forward(&out);
+        for (idx, _layer) in self.layers.iter().enumerate() {
+            let weight = &params[idx * 2];
+            let bias = &params[idx * 2 + 1];
+
+            out = out.matmul(weight).add(bias);
             if idx < last_idx {
                 out = out.relu();
             }
         }
+
         out
+    }
+
+    fn validate_param_shapes(&self, tensors: &[Tensor], label: &str) {
+        let expected = self.layers.len() * 2;
+        assert_eq!(
+            tensors.len(),
+            expected,
+            "{label} count mismatch: expected {expected}, got {}",
+            tensors.len()
+        );
+        for (idx, layer) in self.layers.iter().enumerate() {
+            assert_eq!(
+                tensors[idx * 2].shape(),
+                layer.weight.shape(),
+                "{label} shape mismatch for weight at layer {idx}: expected {:?}, got {:?}",
+                layer.weight.shape(),
+                tensors[idx * 2].shape()
+            );
+            assert_eq!(
+                tensors[idx * 2 + 1].shape(),
+                layer.bias.shape(),
+                "{label} shape mismatch for bias at layer {idx}: expected {:?}, got {:?}",
+                layer.bias.shape(),
+                tensors[idx * 2 + 1].shape()
+            );
+        }
     }
 
     pub fn parameters(&self) -> Vec<Tensor> {
@@ -109,11 +146,11 @@ impl Mlp {
 
     pub fn save_weights<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), String> {
         let dims = self.dims();
-        let params: Vec<Vec<f32>> = self.parameters().iter().map(Tensor::data).collect();
+        let params: Vec<Vec<f32>> = self.parameters().iter().map(Tensor::to_vec).collect();
         save_mlp_checkpoint(path, &dims, &params)
     }
 
-    pub fn load_weights<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), String> {
+    pub fn load_weights<P: AsRef<std::path::Path>>(&mut self, path: P) -> Result<(), String> {
         let checkpoint = load_mlp_checkpoint(path)?;
 
         if checkpoint.version != MLP_CHECKPOINT_VERSION {
@@ -152,10 +189,37 @@ impl Mlp {
             }
         }
 
-        for (ckpt_param, model_param) in checkpoint.params.iter().zip(params.iter()) {
-            model_param.set_data(ckpt_param);
+        let mut checkpoint_params = checkpoint.params.into_iter();
+        for layer in &mut self.layers {
+            let weight = checkpoint_params
+                .next()
+                .expect("validated checkpoint must contain layer weight");
+            let bias = checkpoint_params
+                .next()
+                .expect("validated checkpoint must contain layer bias");
+            layer.weight = Tensor::from_vec(weight, layer.weight.shape().to_vec());
+            layer.bias = Tensor::from_vec(bias, layer.bias.shape().to_vec());
         }
 
         Ok(())
+    }
+}
+
+impl Parameterized for Mlp {
+    fn parameters(&self) -> Vec<Tensor> {
+        Mlp::parameters(self)
+    }
+
+    fn apply_gradients(&mut self, grads: &[Tensor], scale: f32) {
+        self.validate_param_shapes(grads, "gradient");
+
+        let scale_tensor = Tensor::from_vec(vec![scale], vec![1]);
+        for (idx, layer) in self.layers.iter_mut().enumerate() {
+            let weight_grad = &grads[idx * 2];
+            let bias_grad = &grads[idx * 2 + 1];
+
+            layer.weight = layer.weight.sub(&weight_grad.mul(&scale_tensor));
+            layer.bias = layer.bias.sub(&bias_grad.mul(&scale_tensor));
+        }
     }
 }

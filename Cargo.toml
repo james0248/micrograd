@@ -1,8 +1,8 @@
 [package]
-name = "micrograd"
+name = "tangent"
 version = "0.1.0"
 edition = "2024"
-default-run = "micrograd"
+default-run = "tangent"
 
 [dependencies]
 rand = "0.8"

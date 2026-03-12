@@ -1,5 +1,5 @@
 fn main() {
-    if let Err(err) = micrograd::mnist::run() {
-        panic!("micrograd failed: {err}");
+    if let Err(err) = tangent::mnist::run() {
+        panic!("tangent failed: {err}");
     }
 }
