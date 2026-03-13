@@ -187,6 +187,7 @@ struct Mlp {
 }
 
 impl Module for Mlp {
+    #[macros::compact]
     fn forward(&self, input: &Tensor) -> Tensor {
         let last = self.dims.len() - 1;
         let mut x = input.clone();

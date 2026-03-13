@@ -133,14 +133,16 @@ pub(crate) fn exit_scope() -> TensorTree {
         scope.params
     })
 }
-pub(crate) fn push_path(type_name: &str) {
+#[doc(hidden)]
+pub fn push_path(type_name: &str) {
     SCOPE.with(|cell| {
         let mut scope = cell.borrow_mut();
         scope.as_mut().unwrap().push_path(type_name);
     });
 }
 
-pub(crate) fn pop_path() {
+#[doc(hidden)]
+pub fn pop_path() {
     SCOPE.with(|cell| {
         let mut scope = cell.borrow_mut();
         scope.as_mut().unwrap().pop_path();

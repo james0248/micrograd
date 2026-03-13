@@ -17,11 +17,11 @@ pub fn compact(_attr: TokenStream, item: TokenStream) -> TokenStream {
             let full_name = std::any::type_name::<Self>();
             let base_name = full_name.split("::").last().unwrap();
 
-            crate::nn::scope::push_path(base_name);
+            tangent::__private::push_path(base_name);
             let result = {
                 #block
             };
-            crate::nn::scope::pop_path();
+            tangent::__private::pop_path();
 
             result
         }
