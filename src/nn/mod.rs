@@ -1,3 +1,8 @@
+pub mod dense;
+pub mod module;
+pub mod scope;
+pub mod tree;
+
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
