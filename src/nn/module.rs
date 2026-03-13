@@ -1,3 +1,4 @@
+use rand::SeedableRng;
 use rand::rngs::StdRng;
 
 use crate::{
@@ -21,7 +22,7 @@ pub trait Module {
     }
 
     fn init(&self, rng: &mut StdRng, dummy_input: &Tensor) -> TensorTree {
-        enter_init_scope(rng.clone());
+        enter_init_scope(StdRng::from_rng(rng));
         self.call(dummy_input);
         exit_scope()
     }

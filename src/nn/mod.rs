@@ -1,10 +1,11 @@
 pub mod dense;
+pub mod init;
 pub mod module;
 pub mod scope;
 pub mod tree;
 
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 
 use crate::checkpoint::{MLP_CHECKPOINT_VERSION, load_mlp_checkpoint, save_mlp_checkpoint};
 use crate::optim::Parameterized;
@@ -29,7 +30,7 @@ impl Linear {
         let scale = (1.0f32 / nin as f32).sqrt();
         let mut w = Vec::with_capacity(nin * nout);
         for _ in 0..(nin * nout) {
-            w.push(rng.gen_range(-scale..scale));
+            w.push(rng.random_range(-scale..scale));
         }
 
         let b = vec![0.0; nout];

@@ -1,10 +1,18 @@
-use rand::Rng;
-
-use crate::{nn::module::Module, nn::scope::param, tensor::Tensor};
+use crate::{
+    nn::{
+        init::{self, Initializer},
+        module::Module,
+        scope::param,
+    },
+    tensor::Tensor,
+};
 
 pub struct Dense {
     pub out_features: usize,
     pub use_bias: bool,
+
+    kernel_initializer: Initializer,
+    bias_initializer: Initializer,
 }
 
 impl Dense {
@@ -14,7 +22,14 @@ impl Dense {
         Self {
             out_features,
             use_bias,
+            kernel_initializer: init::lecun_normal,
+            bias_initializer: init::zeros,
         }
+    }
+
+    pub fn with_kernel_init(mut self, initializer: Initializer) -> Self {
+        self.kernel_initializer = initializer;
+        self
     }
 }
 
@@ -24,17 +39,13 @@ impl Module for Dense {
 
         let kernel = param(
             "kernel",
-            |rng, shape| Tensor::zeros(shape),
+            self.kernel_initializer,
             vec![*in_features, self.out_features],
         );
         let out = input.matmul(&kernel);
 
         if self.use_bias {
-            let bias = param(
-                "bias",
-                |rng, shape| Tensor::zeros(shape),
-                vec![self.out_features],
-            );
+            let bias = param("bias", self.bias_initializer, vec![self.out_features]);
             out.add(&bias);
         }
 

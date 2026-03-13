@@ -5,6 +5,7 @@ edition = "2024"
 default-run = "tangent"
 
 [dependencies]
-rand = "0.8"
+rand = "0.10"
 serde = { version = "1", features = ["derive"] }
 bincode = "1.3"
+rand_distr = "0.6.0"
