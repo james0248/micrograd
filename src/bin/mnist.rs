@@ -191,7 +191,7 @@ impl Module for Mlp {
         let last = self.dims.len() - 1;
         let mut x = input.clone();
         for (i, &dim) in self.dims.iter().enumerate() {
-            x = Dense::new(dim, true).call(&x);
+            x = Dense::new(dim, true).forward(&x);
             if i < last {
                 x = x.relu();
             }

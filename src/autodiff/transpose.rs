@@ -553,4 +553,3 @@ fn tangent_dependency_table(linearized: &Linearized) -> Vec<bool> {
 
     depends_on_tangent
 }
-

@@ -34,6 +34,7 @@ impl Dense {
 }
 
 impl Module for Dense {
+    #[macros::compact]
     fn forward(&self, input: &Tensor) -> Tensor {
         let in_features = input.shape().last().unwrap();
 
