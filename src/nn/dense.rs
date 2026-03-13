@@ -42,11 +42,11 @@ impl Module for Dense {
             self.kernel_initializer,
             vec![*in_features, self.out_features],
         );
-        let out = input.matmul(&kernel);
+        let mut out = input.matmul(&kernel);
 
         if self.use_bias {
             let bias = param("bias", self.bias_initializer, vec![self.out_features]);
-            out.add(&bias);
+            out = out.add(&bias);
         }
 
         out
